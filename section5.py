@@ -1,63 +1,56 @@
 import os
 import tempfile
-from docx import Document
-from docxcompose.composer import Composer
-from PyPDF2 import PdfReader, PdfWriter
-from docx2pdf import convert
 import subprocess
 import platform
+from docx import Document
+from docxcompose.composer import Composer
+from docx2pdf import convert
+from PyPDF2 import PdfReader, PdfWriter
 
-def extract_last_pages_from_pdf(pdf_path, output_path, num_pages=2):
-    reader = PdfReader(pdf_path)
-    writer = PdfWriter()
-
-    total = len(reader.pages)
-    for i in range(total - num_pages, total):
-        writer.add_page(reader.pages[i])
-
-    with open(output_path, "wb") as f:
-        writer.write(f)
-
-def convert_pdf_to_docx(pdf_path, output_path):
-    # LibreOffice must be installed
+def convert_pdf_to_docx(pdf_path, output_docx_path):
+    # Path to LibreOffice
     if platform.system() == "Windows":
-        soffice_cmd = r'C:\Program Files\LibreOffice\program\soffice.exe'
+        soffice = r"C:\Program Files\LibreOffice\program\soffice.exe"
     else:
-        soffice_cmd = 'libreoffice'
+        soffice = "libreoffice"
 
     subprocess.run([
-        soffice_cmd,
-        '--headless',
-        '--convert-to', 'docx',
-        '--outdir', os.path.dirname(output_path),
+        soffice,
+        "--headless",
+        "--convert-to", "docx",
+        "--outdir", os.path.dirname(output_docx_path),
         pdf_path
     ], check=True)
 
-def append_last_pages(base_docx, source_docx, output_docx, pages_to_append=2):
+def extract_last_page_and_append(base_path, append_path, output_path):
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Step 1: Convert source DOCX to PDF
-        temp_pdf = os.path.join(tmpdir, "source.pdf")
-        convert(source_docx, temp_pdf)
+        # Step 1: Convert base docx to PDF
+        base_pdf = os.path.join(tmpdir, "base.pdf")
+        convert(base_path, base_pdf)
 
-        # Step 2: Extract last N pages from PDF
-        last_pages_pdf = os.path.join(tmpdir, "last_pages.pdf")
-        extract_last_pages_from_pdf(temp_pdf, last_pages_pdf, num_pages=pages_to_append)
+        # Step 2: Extract last page of PDF
+        reader = PdfReader(base_pdf)
+        writer = PdfWriter()
+        writer.add_page(reader.pages[-1])  # Last page only
+        last_page_pdf = os.path.join(tmpdir, "last_page.pdf")
+        with open(last_page_pdf, "wb") as f:
+            writer.write(f)
 
-        # Step 3: Convert last 2 pages back to DOCX
-        convert_pdf_to_docx(last_pages_pdf, tmpdir)
-        extracted_docx = os.path.join(tmpdir, "last_pages.docx")
+        # Step 3: Convert last page PDF back to DOCX
+        convert_pdf_to_docx(last_page_pdf, tmpdir)
+        last_page_docx = os.path.join(tmpdir, "last_page.docx")
 
-        # Step 4: Append to base DOCX
-        base = Document(base_docx)
-        composer = Composer(base)
-        composer.append(Document(extracted_docx))
-        composer.save(output_docx)
-        print(f"✅ Last {pages_to_append} pages appended to: {output_docx}")
+        # Step 4: Use docxcompose to append last page to append_path.docx
+        append_doc = Document(append_path)
+        composer = Composer(append_doc)
+        composer.append(Document(last_page_docx))
+        composer.save(output_path)
+
+        print(f"✅ Last page from '{base_path}' appended to '{append_path}' → saved as '{output_path}'")
 
 # Example usage
-append_last_pages(
-    base_docx="main_report.docx",
-    source_docx="source_pages.docx",
-    output_docx="merged_output.docx",
-    pages_to_append=2
+extract_last_page_and_append(
+    base_path="main_report.docx",       # Extract last page from this
+    append_path="append_this.docx",     # Append to this
+    output_path="merged_result.docx"    # Final merged output
 )
