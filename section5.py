@@ -1,8 +1,12 @@
 import re
+import os
+import tempfile
 from docx import Document
-from docx.shared import RGBColor, Pt
+from docx.shared import Inches
+from docx2pdf import convert
+from pdf2image import convert_from_path
 
-# Keywords to identify the correct table (case-insensitive, flexible)
+# Regex keywords to match table headers
 HEADER_KEYWORDS = [
     r"(?i)molecular/?\s*product",
     r"(?i)study number",
@@ -11,64 +15,68 @@ HEADER_KEYWORDS = [
     r"(?i)active comparator name"
 ]
 
-# Function to check if a table contains all header keywords
+# Check if a table matches header keywords
 def table_matches_keywords(table):
-    # Combine all cell texts in the first row to simulate the header
-    header_row_text = " ".join(cell.text.strip() for cell in table.rows[0].cells)
-    # Check if all keywords are found in the combined header text
-    return all(re.search(pattern, header_row_text) for pattern in HEADER_KEYWORDS)
+    header_text = " ".join(cell.text.strip() for cell in table.rows[0].cells)
+    return all(re.search(pattern, header_text) for pattern in HEADER_KEYWORDS)
 
-# Function to copy table content to another doc
-def copy_table_content(source_table, target_doc):
-    # Create a new table with the same number of columns
-    new_table = target_doc.add_table(rows=0, cols=len(source_table.columns))
-    new_table.style = source_table.style
-
-    for row in source_table.rows:
-        new_row = new_table.add_row()
-        for i, cell in enumerate(row.cells):
-            new_cell = new_row.cells[i]
-            new_cell.text = cell.text
-            # Optional: Copy basic formatting from the source run
-            if cell.paragraphs and cell.paragraphs[0].runs:
-                src_run = cell.paragraphs[0].runs[0]
-                trg_para = new_cell.paragraphs[0]
-                trg_run = trg_para.runs[0]
-                trg_run.bold = src_run.bold
-                trg_run.italic = src_run.italic
-                trg_run.underline = src_run.underline
-                trg_run.font.size = src_run.font.size
-                trg_run.font.color.rgb = src_run.font.color.rgb
-
-# Main function to extract and append the table
-def append_matching_table_with_data(source_path, target_path, output_path):
-    source_doc = Document(source_path)
-    target_doc = Document(target_path)
+# Extract matching tables into a new temporary docx file
+def extract_matching_tables(source_docx, temp_filtered_docx):
+    doc = Document(source_docx)
+    new_doc = Document()
 
     matched = False
-    for table in source_doc.tables:
+    for table in doc.tables:
         if table_matches_keywords(table):
             matched = True
-            # Add a heading before the table (optional)
-            heading = target_doc.add_paragraph("Extracted Table with Header and Data")
-            run = heading.runs[0]
-            run.font.bold = True
-            run.font.size = Pt(14)
-            run.font.color.rgb = RGBColor(0, 0, 0)
+            new_doc.add_paragraph("Extracted Table with Matching Header:")
+            new_table = new_doc.add_table(rows=0, cols=len(table.columns))
+            new_table.style = table.style
 
-            # Copy the full table (headers + data)
-            copy_table_content(table, target_doc)
-            break  # Only the first matching table is copied
+            for row in table.rows:
+                new_row = new_table.add_row()
+                for i, cell in enumerate(row.cells):
+                    new_row.cells[i].text = cell.text
+
+            new_doc.add_page_break()
 
     if matched:
-        target_doc.save(output_path)
-        print(f"✅ Matching table extracted and saved to: {output_path}")
-    else:
-        print("❌ No matching table found with the specified header keywords.")
+        new_doc.save(temp_filtered_docx)
+        return True
+    return False
+
+# Convert filtered docx to PDF, then to images, then insert into target docx
+def insert_matching_table_images(source_docx, target_docx, output_docx):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        filtered_docx = os.path.join(tmpdir, "filtered.docx")
+
+        # Step 1: Extract matching tables
+        has_match = extract_matching_tables(source_docx, filtered_docx)
+        if not has_match:
+            print("❌ No matching tables found with given headers.")
+            return
+
+        # Step 2: Convert filtered docx to PDF
+        filtered_pdf = os.path.join(tmpdir, "filtered.pdf")
+        convert(filtered_docx, filtered_pdf)
+
+        # Step 3: Convert PDF to images (screenshots)
+        images = convert_from_path(filtered_pdf)
+
+        # Step 4: Insert images into target docx
+        target = Document(target_docx)
+        for i, img in enumerate(images):
+            img_path = os.path.join(tmpdir, f"table_{i}.png")
+            img.save(img_path)
+            target.add_picture(img_path, width=Inches(6))
+            target.add_page_break()
+
+        target.save(output_docx)
+        print(f"✅ Matching tables added as images to: {output_docx}")
 
 # Example usage
-append_matching_table_with_data(
-    source_path="source.docx",
-    target_path="target.docx",
-    output_path="output_with_matched_table.docx"
+insert_matching_table_images(
+    source_docx="source.docx",
+    target_docx="target.docx",
+    output_docx="output_with_table_screenshots.docx"
 )
