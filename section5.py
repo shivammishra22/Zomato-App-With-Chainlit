@@ -1,8 +1,8 @@
 import os
 import pandas as pd
 from docx import Document
-from docx.shared import RGBColor
 from config.styling_config import DocumentStyling
+
 # ------------------ Step 1: Extract Specific Table from Word ------------------ #
 def extract_specific_table(docx_path, keywords):
     doc = Document(docx_path)
@@ -66,15 +66,18 @@ def process_excel_data(excel_path):
 def generate_word_document(df, non_zero_columns, word_path):
     doc = Document()
 
-    doc.add_heading('Jubilant Generics Limited', level=1)
-    doc.add_heading('Levetiracetam Periodic Safety Update Report', level=2)
+    # Heading
+    DocumentStyling.create_split_heading(doc.add_paragraph(), '1 Jubilant Generics Limited')
+    DocumentStyling.create_split_heading(doc.add_paragraph(), '2 Levetiracetam Periodic Safety Update Report')
 
+    # Reporting Period
     para = doc.add_paragraph()
     run = para.add_run('Reporting period: 30-Nov-2024 to 30-Nov-2024')
-    run.font.color.rgb = RGBColor(0, 0, 0)
+    DocumentStyling.apply_bold_content_style(run)
 
-    doc.add_heading('5 ESTIMATED EXPOSURE AND USE PATTERNS', level=2)
-    doc.add_heading('5.1 General considerations', level=3)
+    # Section 5 Title
+    DocumentStyling.create_split_heading(doc.add_paragraph(), '5 ESTIMATED EXPOSURE AND USE PATTERNS')
+    DocumentStyling.create_split_subheading(doc.add_paragraph(), '5.1 General considerations')
 
     para = doc.add_paragraph()
     run = para.add_run(
@@ -82,9 +85,9 @@ def generate_word_document(df, non_zero_columns, word_path):
         'In terms of post marketing use patient exposure cannot be accurately calculated for certain reasons such as varying dosage and '
         'duration of treatment as well as changing or unknown patient compliance.'
     )
-    run.font.color.rgb = RGBColor(0, 0, 0)
+    DocumentStyling.apply_content_style(run)
 
-    doc.add_heading('5.2 Cumulative Subject Exposure in Clinical Trials', level=3)
+    DocumentStyling.create_split_subheading(doc.add_paragraph(), '5.2 Cumulative Subject Exposure in Clinical Trials')
 
     total_subjects = int(df["Total"].sum())
     num_studies = len(df)
@@ -100,24 +103,24 @@ def generate_word_document(df, non_zero_columns, word_path):
 
     para = doc.add_paragraph()
     run = para.add_run(summary_text)
-    run.font.color.rgb = RGBColor(0, 0, 0)
+    DocumentStyling.apply_content_style(run)
 
     doc.add_paragraph("\n")
 
+    # Table
     table = doc.add_table(rows=1, cols=len(df.columns))
-    table.style = 'Table Grid'
+    table.style = DocumentStyling.TABLE_STYLE if hasattr(DocumentStyling, 'TABLE_STYLE') else 'Table Grid'
 
     hdr_cells = table.rows[0].cells
     for i, column_name in enumerate(df.columns):
         run = hdr_cells[i].paragraphs[0].add_run(str(column_name))
-        run.bold = True
-        run.font.color.rgb = RGBColor(0, 0, 0)
+        DocumentStyling.apply_table_header_style(hdr_cells[i])
 
     for _, row in df.iterrows():
         row_cells = table.add_row().cells
         for i, cell_value in enumerate(row):
             run = row_cells[i].paragraphs[0].add_run(str(cell_value))
-            run.font.color.rgb = RGBColor(0, 0, 0)
+            DocumentStyling.apply_content_style(run)
 
     doc.save(word_path)
     print(f"✅ Word document saved to {word_path}")
