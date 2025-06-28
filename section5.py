@@ -1,93 +1,63 @@
-import re
 import os
+import tempfile
 from docx import Document
 from docxcompose.composer import Composer
+from PyPDF2 import PdfReader, PdfWriter
+from docx2pdf import convert
+import subprocess
+import platform
 
-# Regex header patterns to match
-HEADER_KEYWORDS = [
-    r"(?i)molecular/?\s*product",
-    r"(?i)study number",
-    r"(?i)study title",
-    r"(?i)test\s*product name",
-    r"(?i)active comparator name"
-]
+def extract_last_pages_from_pdf(pdf_path, output_path, num_pages=2):
+    reader = PdfReader(pdf_path)
+    writer = PdfWriter()
 
-# Check if table matches the regex patterns
-def table_matches_keywords(table):
-    header_text = " ".join(cell.text.strip() for cell in table.rows[0].cells)
-    return all(re.search(pattern, header_text) for pattern in HEADER_KEYWORDS)
+    total = len(reader.pages)
+    for i in range(total - num_pages, total):
+        writer.add_page(reader.pages[i])
 
-# Extract content (paragraphs and tables) from source if any table matches
-def extract_matching_content(source_path, temp_output_path):
-    source_doc = Document(source_path)
-    new_doc = Document()
-    matched = False
+    with open(output_path, "wb") as f:
+        writer.write(f)
 
-    for block in iter_block_items(source_doc):
-        if isinstance(block, TableWrapper):
-            if table_matches_keywords(block.table):
-                matched = True
-                new_doc.add_paragraph("Matching Table Section:")
-                copy_table(block.table, new_doc)
-        elif isinstance(block, ParagraphWrapper):
-            if matched:
-                new_doc.add_paragraph(block.paragraph.text)
+def convert_pdf_to_docx(pdf_path, output_path):
+    # LibreOffice must be installed
+    if platform.system() == "Windows":
+        soffice_cmd = r'C:\Program Files\LibreOffice\program\soffice.exe'
+    else:
+        soffice_cmd = 'libreoffice'
 
-    if matched:
-        new_doc.save(temp_output_path)
-    return matched
+    subprocess.run([
+        soffice_cmd,
+        '--headless',
+        '--convert-to', 'docx',
+        '--outdir', os.path.dirname(output_path),
+        pdf_path
+    ], check=True)
 
-# Util: Wrap document block items
-from docx.table import Table
-from docx.text.paragraph import Paragraph
+def append_last_pages(base_docx, source_docx, output_docx, pages_to_append=2):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Step 1: Convert source DOCX to PDF
+        temp_pdf = os.path.join(tmpdir, "source.pdf")
+        convert(source_docx, temp_pdf)
 
-class ParagraphWrapper:
-    def __init__(self, paragraph):
-        self.paragraph = paragraph
+        # Step 2: Extract last N pages from PDF
+        last_pages_pdf = os.path.join(tmpdir, "last_pages.pdf")
+        extract_last_pages_from_pdf(temp_pdf, last_pages_pdf, num_pages=pages_to_append)
 
-class TableWrapper:
-    def __init__(self, table):
-        self.table = table
+        # Step 3: Convert last 2 pages back to DOCX
+        convert_pdf_to_docx(last_pages_pdf, tmpdir)
+        extracted_docx = os.path.join(tmpdir, "last_pages.docx")
 
-def iter_block_items(parent):
-    for child in parent.element.body.iterchildren():
-        if child.tag.endswith('}p'):
-            yield ParagraphWrapper(Paragraph(child, parent))
-        elif child.tag.endswith('}tbl'):
-            yield TableWrapper(Table(child, parent))
-
-# Copy table to target doc (without changing formatting)
-def copy_table(source_table, target_doc):
-    new_table = target_doc.add_table(rows=0, cols=len(source_table.columns))
-    new_table.style = source_table.style
-
-    for row in source_table.rows:
-        new_row = new_table.add_row()
-        for i, cell in enumerate(row.cells):
-            new_row.cells[i].text = cell.text
-
-# Merge result into base document using Composer (preserves formatting)
-def append_docx_with_matching_page(base_path, source_path, output_path):
-    temp_docx = "temp_matching.docx"
-    matched = extract_matching_content(source_path, temp_docx)
-
-    if not matched:
-        print("❌ No matching content found with regex headers.")
-        return
-
-    base_doc = Document(base_path)
-    composer = Composer(base_doc)
-    matching_doc = Document(temp_docx)
-
-    composer.append(matching_doc)
-    composer.save(output_path)
-
-    os.remove(temp_docx)
-    print(f"✅ Matching content appended and saved to: {output_path}")
+        # Step 4: Append to base DOCX
+        base = Document(base_docx)
+        composer = Composer(base)
+        composer.append(Document(extracted_docx))
+        composer.save(output_docx)
+        print(f"✅ Last {pages_to_append} pages appended to: {output_docx}")
 
 # Example usage
-append_docx_with_matching_page(
-    base_path="main_report.docx",
-    source_path="append_page.docx",  # Full source document to scan
-    output_path="merged_output.docx"
+append_last_pages(
+    base_docx="main_report.docx",
+    source_docx="source_pages.docx",
+    output_docx="merged_output.docx",
+    pages_to_append=2
 )
