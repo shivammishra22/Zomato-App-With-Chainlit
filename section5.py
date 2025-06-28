@@ -1,12 +1,9 @@
 import re
 import os
-import tempfile
 from docx import Document
-from docx.shared import Inches
-from docx2pdf import convert
-from pdf2image import convert_from_path
+from docxcompose.composer import Composer
 
-# Regex keywords to match table headers
+# Regex header patterns to match
 HEADER_KEYWORDS = [
     r"(?i)molecular/?\s*product",
     r"(?i)study number",
@@ -15,68 +12,82 @@ HEADER_KEYWORDS = [
     r"(?i)active comparator name"
 ]
 
-# Check if a table matches header keywords
+# Check if table matches the regex patterns
 def table_matches_keywords(table):
     header_text = " ".join(cell.text.strip() for cell in table.rows[0].cells)
     return all(re.search(pattern, header_text) for pattern in HEADER_KEYWORDS)
 
-# Extract matching tables into a new temporary docx file
-def extract_matching_tables(source_docx, temp_filtered_docx):
-    doc = Document(source_docx)
+# Extract content (paragraphs and tables) from source if any table matches
+def extract_matching_content(source_path, temp_output_path):
+    source_doc = Document(source_path)
     new_doc = Document()
-
     matched = False
-    for table in doc.tables:
-        if table_matches_keywords(table):
-            matched = True
-            new_doc.add_paragraph("Extracted Table with Matching Header:")
-            new_table = new_doc.add_table(rows=0, cols=len(table.columns))
-            new_table.style = table.style
 
-            for row in table.rows:
-                new_row = new_table.add_row()
-                for i, cell in enumerate(row.cells):
-                    new_row.cells[i].text = cell.text
-
-            new_doc.add_page_break()
+    for block in iter_block_items(source_doc):
+        if isinstance(block, TableWrapper):
+            if table_matches_keywords(block.table):
+                matched = True
+                new_doc.add_paragraph("Matching Table Section:")
+                copy_table(block.table, new_doc)
+        elif isinstance(block, ParagraphWrapper):
+            if matched:
+                new_doc.add_paragraph(block.paragraph.text)
 
     if matched:
-        new_doc.save(temp_filtered_docx)
-        return True
-    return False
+        new_doc.save(temp_output_path)
+    return matched
 
-# Convert filtered docx to PDF, then to images, then insert into target docx
-def insert_matching_table_images(source_docx, target_docx, output_docx):
-    with tempfile.TemporaryDirectory() as tmpdir:
-        filtered_docx = os.path.join(tmpdir, "filtered.docx")
+# Util: Wrap document block items
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
-        # Step 1: Extract matching tables
-        has_match = extract_matching_tables(source_docx, filtered_docx)
-        if not has_match:
-            print("❌ No matching tables found with given headers.")
-            return
+class ParagraphWrapper:
+    def __init__(self, paragraph):
+        self.paragraph = paragraph
 
-        # Step 2: Convert filtered docx to PDF
-        filtered_pdf = os.path.join(tmpdir, "filtered.pdf")
-        convert(filtered_docx, filtered_pdf)
+class TableWrapper:
+    def __init__(self, table):
+        self.table = table
 
-        # Step 3: Convert PDF to images (screenshots)
-        images = convert_from_path(filtered_pdf)
+def iter_block_items(parent):
+    for child in parent.element.body.iterchildren():
+        if child.tag.endswith('}p'):
+            yield ParagraphWrapper(Paragraph(child, parent))
+        elif child.tag.endswith('}tbl'):
+            yield TableWrapper(Table(child, parent))
 
-        # Step 4: Insert images into target docx
-        target = Document(target_docx)
-        for i, img in enumerate(images):
-            img_path = os.path.join(tmpdir, f"table_{i}.png")
-            img.save(img_path)
-            target.add_picture(img_path, width=Inches(6))
-            target.add_page_break()
+# Copy table to target doc (without changing formatting)
+def copy_table(source_table, target_doc):
+    new_table = target_doc.add_table(rows=0, cols=len(source_table.columns))
+    new_table.style = source_table.style
 
-        target.save(output_docx)
-        print(f"✅ Matching tables added as images to: {output_docx}")
+    for row in source_table.rows:
+        new_row = new_table.add_row()
+        for i, cell in enumerate(row.cells):
+            new_row.cells[i].text = cell.text
+
+# Merge result into base document using Composer (preserves formatting)
+def append_docx_with_matching_page(base_path, source_path, output_path):
+    temp_docx = "temp_matching.docx"
+    matched = extract_matching_content(source_path, temp_docx)
+
+    if not matched:
+        print("❌ No matching content found with regex headers.")
+        return
+
+    base_doc = Document(base_path)
+    composer = Composer(base_doc)
+    matching_doc = Document(temp_docx)
+
+    composer.append(matching_doc)
+    composer.save(output_path)
+
+    os.remove(temp_docx)
+    print(f"✅ Matching content appended and saved to: {output_path}")
 
 # Example usage
-insert_matching_table_images(
-    source_docx="source.docx",
-    target_docx="target.docx",
-    output_docx="output_with_table_screenshots.docx"
+append_docx_with_matching_page(
+    base_path="main_report.docx",
+    source_path="append_page.docx",  # Full source document to scan
+    output_path="merged_output.docx"
 )
