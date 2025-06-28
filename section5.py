@@ -1,65 +1,50 @@
 from docx import Document
-from config.styling_config import DocumentStyling
+from docx.shared import RGBColor, Pt
+from copy import deepcopy
 
-# Create a new Document
-doc = Document()
+# Function to copy table from source to target document
+def append_table_with_format(source_path, target_path, output_path, table_index=0):
+    source_doc = Document(source_path)
+    target_doc = Document(target_path)
 
-# Utility functions using DocumentStyling
-def add_styled_section_heading(text):
-    para = doc.add_paragraph()
-    DocumentStyling.create_split_heading(para, text)
+    # Select the specific table from source
+    table = source_doc.tables[table_index]
 
-def add_styled_subheading(text):
-    para = doc.add_paragraph()
-    DocumentStyling.create_split_subheading(para, text)
+    # Append a heading before the table (optional)
+    heading = target_doc.add_paragraph("Appended Table with Sub-Headings")
+    run = heading.runs[0]
+    run.font.bold = True
+    run.font.size = Pt(14)
+    run.font.color.rgb = RGBColor(0, 0, 0)
 
-def add_styled_paragraph(text):
-    para = doc.add_paragraph()
-    run = para.add_run(text)
-    DocumentStyling.apply_content_style(run)
+    # Append table
+    new_table = target_doc.add_table(rows=0, cols=len(table.columns))
+    new_table.style = table.style
 
-# ----------------- Section 7 ----------------- #
-add_styled_section_heading("7 SUMMARIES OF SIGNIFICANT FINDINGS FROM CLINICAL TRIALS DURING THE REPORTING INTERVAL")
+    for row in table.rows:
+        new_row = new_table.add_row()
+        for i, cell in enumerate(row.cells):
+            new_cell = new_row.cells[i]
+            new_cell.text = cell.text
+            # Optional: Copy font styles (bold, size, etc.) if needed
+            if cell.paragraphs and cell.paragraphs[0].runs:
+                src_run = cell.paragraphs[0].runs[0]
+                trg_para = new_cell.paragraphs[0]
+                trg_run = trg_para.runs[0]
+                trg_run.bold = src_run.bold
+                trg_run.italic = src_run.italic
+                trg_run.underline = src_run.underline
+                trg_run.font.size = src_run.font.size
+                trg_run.font.color.rgb = src_run.font.color.rgb
 
-# 7.1
-add_styled_subheading("7.1 Completed clinical trials")
-add_styled_paragraph("MAH did not conduct or completed any clinical trials during the reporting period covered by this report.")
+    # Save output
+    target_doc.save(output_path)
+    print(f"✅ Table successfully appended to: {output_path}")
 
-# 7.2
-add_styled_subheading("7.2 Ongoing clinical trials")
-add_styled_paragraph("No clinical trials were ongoing during the period covered by this report.")
-
-# Metadata
-add_styled_paragraph(
-    "Version status: Final v 1.0 Confidential LEVE-UA-002\n"
-    "Version date: 18-Feb-2025 Page 39 of 65\n\n"
-    "Jubilant Generics Limited Levetiracetam Periodic Safety Update Report\n"
-    "Reporting period: 30-Nov-2021 to 30-Nov-2024"
+# Example usage
+append_table_with_format(
+    source_path="source.docx",
+    target_path="target.docx",
+    output_path="merged_output.docx",
+    table_index=0  # Index of the table in source file
 )
-
-# 7.3
-add_styled_subheading("7.3 Long term follow up")
-add_styled_paragraph("No long-term studies were conducted during the period covered by this report.")
-
-# 7.4
-add_styled_subheading("7.4 Other therapeutic use of medicinal product")
-add_styled_paragraph(
-    "No such information is available as the MAH did not conduct any programmes that follow a specific protocol, "
-    "with solicited reporting as per ICH-E2D (e.g., expanded access programmes, compassionate use programmes, "
-    "particular patient use, and other organised data collection)."
-)
-
-# 7.5
-add_styled_subheading("7.5 New safety data related to fixed combination therapies")
-add_styled_paragraph("No clinical study with levetiracetam in other combination was conducted during the reporting interval.")
-
-# ----------------- Section 8 ----------------- #
-add_styled_section_heading("8 FINDINGS FROM NON-INTERVENTIONAL STUDIES")
-add_styled_paragraph(
-    "The MAH has not conducted any non-interventional study related to the current product under consideration "
-    "since obtaining initial granting of MA. Hence, no such information is available."
-)
-
-# Save the document
-doc.save("sec7_8.docx")
-print("✅ Document 'sec7_8.docx' created using styling_config.")
