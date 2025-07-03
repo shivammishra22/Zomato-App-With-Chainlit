@@ -132,9 +132,11 @@ def process_document(doc_path, keywords, stop_line):
     remove_blank_paragraphs(doc)
     clear_text(doc)
 
-    final_path = os.path.join(os.path.dirname(doc_path), "final_Table.docx")
+    final_path = os.path.join(os.path.dirname(doc_path).replace("embedding\\01PSUR", "New_Psur_File"), "final_Table.docx")
+    os.makedirs(os.path.dirname(final_path), exist_ok=True)  # ✅ Ensure folder exists
     doc.save(final_path)
     print(f"✅ Cleaned document saved to: {final_path}")
+
 
 # === MAIN SCRIPT ===
 if __name__ == "__main__":
