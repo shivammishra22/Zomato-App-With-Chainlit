@@ -1,9 +1,7 @@
 import os
-import re
 import pandas as pd
 from docx import Document
 
-# ========== EXTRACT TABLE FROM DOCX ==========
 def extract_specific_table(docx_path, keywords):
     doc = Document(docx_path)
     matched_table = None
@@ -18,9 +16,63 @@ def extract_specific_table(docx_path, keywords):
             break
 
     if matched_table:
-        extracted_data = [[cell.text.strip() for cell in row.cells] for row in matched_table.rows]
+        extracted_data = []
+        for row in matched_table.rows:
+            extracted_data.append([cell.text.strip() for cell in row.cells])
+
+        # Remove duplicate header rows if the first two rows are identical
         if len(extracted_data) > 1 and extracted_data[0] == extracted_data[1]:
             extracted_data.pop(1)
+
+        return extracted_data
+    else:
+        print("❌ No matching table found.")
+        return []
+
+def save_table_to_excel(table_data, excel_path):
+    os.makedirs(os.path.dirname(excel_path), exist_ok=True)
+    df = pd.DataFrame(table_data[1:], columns=table_data[0])  # Use first row as header
+    df.to_excel(excel_path, sheet_name='Extracted_Table', index=False)
+    print(f"✅ Specific table saved to {excel_path}")
+
+# ✅ Replace with actual paths
+docx_path = r"C:\Users\shivam.mishra2\Downloads\embedding\01PSUR\Data request form.docx"
+excel_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\intial_table1.xlsx"
+
+# Keywords to identify the specific table
+keywords = ["Molecular Product", "Study Number", "Test Product Name","Active comparator name","TestProduct","Active Comparator","Placebo","Total"]
+# Extract and save
+table_data = extract_specific_table(docx_path, keywords)
+if table_data:
+    save_table_to_excel(table_data, excel_path)
+
+######Second file
+import os
+import re
+import pandas as pd
+from docx import Document
+
+def extract_specific_table(docx_path, keywords):
+    doc = Document(docx_path)
+    matched_table = None
+
+    for table in doc.tables:
+        for row in table.rows:
+            row_text = [cell.text.strip() for cell in row.cells]
+            if any(keyword in cell for cell in row_text for keyword in keywords):
+                matched_table = table
+                break
+        if matched_table:
+            break
+
+    if matched_table:
+        extracted_data = []
+        for row in matched_table.rows:
+            extracted_data.append([cell.text.strip() for cell in row.cells])
+
+        if len(extracted_data) > 1 and extracted_data[0] == extracted_data[1]:
+            extracted_data.pop(1)
+
         return extracted_data
     else:
         print("❌ No matching table found.")
@@ -30,9 +82,8 @@ def save_table_to_excel(table_data, excel_path):
     os.makedirs(os.path.dirname(excel_path), exist_ok=True)
     df = pd.DataFrame(table_data[1:], columns=table_data[0])
     df.to_excel(excel_path, sheet_name='Extracted_Table', index=False)
-    print(f"✅ Table saved to Excel: {excel_path}")
+    print(f"✅ Specific table saved to {excel_path}")
 
-# ========== GENERATE SUMMARY DOCUMENT ==========
 def generate_summary_doc(excel_path, output_doc_path):
     df = pd.read_excel(excel_path, engine='openpyxl')
 
@@ -47,9 +98,21 @@ def generate_summary_doc(excel_path, output_doc_path):
         ('Racial distribution of subjects enrolled', 'Caucasian'), ('Racial distribution of subjects enrolled', 'Other'),
         ('Racial distribution of subjects enrolled', 'Unknown')
     ])
+
     df.columns = columns
-    df_new = df.iloc[2:].copy().reset_index(drop=True)
-    df_new[columns[5:]] = df_new[columns[5:]].apply(pd.to_numeric, errors='coerce')
+    df_new = df.iloc[2:].copy()
+    df_new.reset_index(drop=True, inplace=True)
+
+    columns_to_convert = [
+        ('No. of subjects enrolled', 'Test Product'), ('No. of subjects enrolled', 'Active Comparator'),
+        ('No. of subjects enrolled', 'Placebo'), ('No. of subjects enrolled', 'Total'),
+        ('Gender distribution of subjects enrolled', 'Male'), ('Gender distribution of subjects enrolled', 'Female'),
+        ('Age distribution of subjects enrolled', '<18 years'), ('Age distribution of subjects enrolled', '18-65 years'),
+        ('Age distribution of subjects enrolled', '>65 years'), ('Racial distribution of subjects enrolled', 'Asian'),
+        ('Racial distribution of subjects enrolled', 'Black'), ('Racial distribution of subjects enrolled', 'Caucasian'),
+        ('Racial distribution of subjects enrolled', 'Other'), ('Racial distribution of subjects enrolled', 'Unknown')
+    ]
+    df_new[columns_to_convert] = df_new[columns_to_convert].apply(pd.to_numeric, errors='coerce')
 
     target_columns = [
         ('Age distribution of subjects enrolled', '<18 years'),
@@ -76,91 +139,122 @@ def generate_summary_doc(excel_path, output_doc_path):
 
     total_subjects = int(df_new[('No. of subjects enrolled', 'Total')].sum())
     num_studies = len(df_new)
-    age_group = non_zero_columns[0][1] if non_zero_columns else "Unknown"
+    age_group = non_zero_columns[0][1] if len(non_zero_columns) > 0 else "Unknown"
     gender_group = 'Male' if df_new[('Gender distribution of subjects enrolled', 'Male')].sum() > 0 else 'Female'
-    medicine_name = "levetiracetam"
-
+    medicine_name="levetiracetam"
     summary_text = (
         f"Jubilant as MAH has not conducted any Clinical Trials. However, Jubilant has conducted {num_studies} BA/BE study with {medicine_name} till the DLP of the PSUR 30-Nov-2024 "
         f"and cumulative subject exposure in the completed clinical trial were {total_subjects} subjects.\n\n"
         f"Of these {total_subjects}, all were {gender_group} subjects of age distribution between {age_group} years. "
-        f"Cumulative subject exposure to {medicine_name} in BA/BE studies is given in the table below:"
+        "Cumulative subject exposure to {medicine_name} in BA/BE studies is given in the table below:"
     )
     doc.add_paragraph(summary_text)
     doc.save(output_doc_path)
-    print(f"✅ Summary document saved to: {output_doc_path}")
+    print(f"✅ Summary document saved to {output_doc_path}")
 
-# ========== DOCUMENT CLEANUP ==========
-def process_document(doc_path, keywords, stop_line, output_path):
-    doc = Document(doc_path)
+# Paths
+docx_path = r"C:\Users\shivam.mishra2\Downloads\embedding\01PSUR\Data request form.docx"
+excel_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\intial_table1.xlsx"
+output_doc_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\Section5.docx"
 
-    # Delete tables
+keywords = ["Molecular Product", "Study Number", "Test Product Name", "Active comparator name", "TestProduct", "Active Comparator", "Placebo", "Total"]
+
+# Run the process
+table_data = extract_specific_table(docx_path, keywords)
+if table_data:
+    save_table_to_excel(table_data, excel_path)
+    generate_summary_doc(excel_path, output_doc_path)
+####Third file
+import re
+import os
+from docx import Document
+
+def delete_tables_with_keywords(doc, keywords):
+    tables_to_delete = []
     for table in doc.tables:
         table_text = " ".join(cell.text for row in table.rows for cell in row.cells)
         if any(re.search(keyword, table_text, re.IGNORECASE) for keyword in keywords):
-            tbl = table._element
-            tbl.getparent().remove(tbl)
+            tables_to_delete.append(table)
+    for table in tables_to_delete:
+        tbl = table._element
+        tbl.getparent().remove(tbl)
 
-    # Delete paragraphs before stop line
+def extract_text_before_stop_line(doc, stop_line):
     full_text = "\n".join([para.text for para in doc.paragraphs])
     match = re.search(rf"^(.*?)\b{re.escape(stop_line)}\b", full_text, re.DOTALL | re.IGNORECASE)
-    if match:
-        delete_texts = [line.strip() for line in match.group(1).splitlines() if line.strip()]
-        for para in doc.paragraphs:
-            if para.text.strip() in delete_texts:
-                p = para._element
-                p.getparent().remove(p)
+    return match.group(1) if match else ""
 
-    # Remove blank paragraphs
+def delete_multiple_paragraphs(doc, lines_to_delete_text):
+    lines_to_delete = [line.strip() for line in lines_to_delete_text.splitlines() if line.strip()]
+    for para in doc.paragraphs:
+        if para.text.strip() in lines_to_delete:
+            p = para._element
+            p.getparent().remove(p)
+            p._p = p._element = None
+
+def remove_blank_paragraphs(doc):
     for para in doc.paragraphs:
         if not para.text.strip():
             p = para._element
             p.getparent().remove(p)
+def clear_text(doc):
+    # Clear all paragraphs
+    for para in doc.paragraphs:
+        para.clear()
 
-    doc.save(output_path)
-    print(f"✅ Cleaned document saved to: {output_path}")
+def process_document(doc_path, keywords, stop_line):
+    doc = Document(doc_path)
 
-# ========== MERGE TWO DOCX ==========
-def merge_documents(doc1_path, doc2_path, output_path):
-    doc1 = Document(doc1_path)
-    doc2 = Document(doc2_path)
-    merged = Document()
-    for elem in doc1.element.body:
-        merged.element.body.append(elem)
-    for elem in doc2.element.body:
-        merged.element.body.append(elem)
-    merged.save(output_path)
-    print(f"✅ Merged document saved to: {output_path}")
+    # Step 1: Delete tables with keywords
+    delete_tables_with_keywords(doc, keywords)
 
-# ========== MAIN FUNCTION ==========
-def main(input_doc_path):
-    base_dir = os.path.dirname(input_doc_path)
-    base_name = os.path.splitext(os.path.basename(input_doc_path))[0]
+    # Step 2: Extract text before stop line
+    extracted_text = extract_text_before_stop_line(doc, stop_line)
 
-    excel_path = os.path.join(base_dir, f"{base_name}_table.xlsx")
-    section5_path = os.path.join(base_dir, "Section5.docx")
-    cleaned_path = os.path.join(base_dir, "final_table.docx")
-    merged_path = os.path.join(base_dir, "mergedFINAL_document.docx")
+    # Step 3: Delete matching paragraphs
+    if extracted_text:
+        delete_multiple_paragraphs(doc, extracted_text)
 
-    keywords = ["Molecular Product", "Study Number", "Test Product Name", "Active comparator name", "TestProduct", "Active Comparator", "Placebo", "Total"]
-    stop_line = "Pooled literature Data: PVG Department"
+    # Step 4: Remove blank paragraphs
+    remove_blank_paragraphs(doc)
 
-    # Extract Table & Save to Excel
-    table_data = extract_specific_table(input_doc_path, keywords)
-    if not table_data:
-        return
-    save_table_to_excel(table_data, excel_path)
+    clear_text(doc)
 
-    # Generate Section 5
-    generate_summary_doc(excel_path, section5_path)
+    # Step 5: Save final document
+    dir_name = os.path.dirname(doc_path)
+    final_path = os.path.join(dir_name, "final_Table.docx")
+    doc.save(final_path)
+    print(f"Document saved to: {final_path}")
 
-    # Process & clean the section5 file
-    process_document(section5_path, keywords=["Country", "Signal term"], stop_line=stop_line, output_path=cleaned_path)
 
-    # Merge
-    merge_documents(section5_path, cleaned_path, merged_path)
+# Example usage
+keywords = ["Country", "Signal term"]
+stop_line = "Pooled literature Data: PVG Department"
+doc_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\final_Table.docx"
 
-# ========== ENTRY POINT ==========
-if __name__ == "__main__":
-    input_doc = r"C:\Users\shivam.mishra2\Downloads\embedding\01PSUR\Data request form.docx"
-    main(input_doc)
+process_document(doc_path, keywords, stop_line)
+#### Fourth File
+from docx import Document
+
+# Paths to the documents
+doc1_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\Section5.docx"
+doc2_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\final_Table.docx"
+
+# Load both documents
+doc1 = Document(doc1_path)
+doc2 = Document(doc2_path)
+
+# Create a new document for the merged content
+merged_doc = Document()
+
+# Append content from the first document
+for element in doc1.element.body:
+    merged_doc.element.body.append(element)
+
+# Append content from the second document
+for element in doc2.element.body:
+    merged_doc.element.body.append(element)
+
+# Save the merged document
+merged_doc.save(r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\mergedFINAL_document.docx")
+print("Documents merged successfully.")
