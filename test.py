@@ -30,72 +30,72 @@ df[col] = df[col].astype(str).str.replace(",", "").str.split(":").str[-1].str.st
 df[col] = pd.to_numeric(df[col], errors='coerce')
 
 df["Delivered quantity (mg)"] = pd.to_numeric(df["Delivered quantity (mg)"].astype(str).str.replace(",", ""), errors='coerce')
-
 df.rename(columns={"Product": "Molecule"}, inplace=True)
 
 # === CALCULATIONS ===
-df["Sales Figure (mg) or period/Volume of sales (in mg)"] = df["Number of tablets / Capsules/Injections"] * df["Strength in mg"]
+df["Sales Figure (mg) or period/Volume of sales (in mg)"] = df[col] * df["Strength in mg"]
 df["Patients Exposure (PTY) for period"] = df["Sales Figure (mg) or period/Volume of sales (in mg)"] / (ddd_value * 365)
 df["Patients Exposure (PTY) for period"] = df["Patients Exposure (PTY) for period"].round(0)
 
 # === FILTERING ===
+df_country = df[df["Country"] == country_name].copy()
+df_non_country = df[df["Country"] != country_name].copy()
 
-# Filter data
-df_country = df[df["Country"] == "South Africa"].reset_index(drop=True)
-df_non_country = df[df["Country"] != "South Africa"].reset_index(drop=True)
+# === TOTAL ROW CREATION ===
+def create_clean_total_row(dataframe):
+    total = dataframe["Patients Exposure (PTY) for period"].sum()
+    total_row = {col: "" for col in dataframe.columns}
+    total_row["Country"] = "Total"
+    total_row["Patients Exposure (PTY) for period"] = int(total)
+    return pd.DataFrame([total_row])
 
-# Calculate totals
-country_total_exposure = df_country["Patients Exposure (PTY) for period"].sum()
-non_country_total_exposure = df_non_country["Patients Exposure (PTY) for period"].sum()
+df_country = pd.concat([df_country, create_clean_total_row(df_country)], ignore_index=True)
+df_non_country = pd.concat([df_non_country, create_clean_total_row(df_non_country)], ignore_index=True)
 
-# Create total rows
-country_total_row = pd.DataFrame([{
-    "Country": "Total",
-    "Patients Exposure (PTY) for period": country_total_exposure
-}])
-
-non_country_total_row = pd.DataFrame([{
-    "Country": "Total",
-    "Patients Exposure (PTY) for period": non_country_total_exposure
-}])
-
-# Append total rows
-df_country = pd.concat([df_country, country_total_row], ignore_index=True)
-df_non_country = pd.concat([df_non_country, non_country_total_row], ignore_index=True)
-# Replace NaN values with blank space only in rows where Country is 'Total'
-df.loc[df['Country'] == 'Total'] = df.loc[df['Country'] == 'Total'].fillna("")
-
-# Replace all NaN values with blank space
-df.replace(np.nan, '', inplace=True)
-
+# Replace all NaN values in both DataFrames
+df_country.fillna("", inplace=True)
+df_non_country.fillna("", inplace=True)
 
 # === WORD DOCUMENT GENERATION ===
 doc = Document()
 doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
 
+country_total_exposure = df_country[df_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
+non_country_total_exposure = df_non_country[df_non_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
+total_exposure = country_total_exposure + non_country_total_exposure
+
 summary_text = (
     f"The MAH obtained initial MA for their generic formulation of {medicine} in {place} on {date}.\n"
-    f"The post-authorization exposure to {medicine} during the cumulative period was {int(total_exposure)} patients\n"
-    f"({place}: {int(country_exposure)} and Non {place}: {int(non_country_exposure)}) treatment days approximately and presented in Table 3."
+    f"The post-authorization exposure to {medicine} during the cumulative period was {int(total_exposure)} patients "
+    f"({place}: {int(country_total_exposure)} and Non {place}: {int(non_country_total_exposure)}) treatment days approximately and presented in Table 3."
 )
 doc.add_paragraph(summary_text)
 
-def add_table_to_doc(document, dataframe, title):
-    document.add_heading(title, level=2)
+# Function to add tables with internal subheading row
+def add_table_with_heading_row(document, dataframe, table_title):
     table = document.add_table(rows=1, cols=len(dataframe.columns))
     table.style = 'Table Grid'
 
+    # Header
     hdr_cells = table.rows[0].cells
     for i, col_name in enumerate(dataframe.columns):
         hdr_cells[i].text = str(col_name)
 
+    # Sub-heading row inside table
+    sub_heading_cells = table.add_row().cells
+    for i in range(len(dataframe.columns)):
+        sub_heading_cells[i].text = f"{table_title if i == 0 else ''}"
+
+    # Data rows
     for _, row in dataframe.iterrows():
         row_cells = table.add_row().cells
         for i, item in enumerate(row):
             row_cells[i].text = str(item)
 
-add_table_to_doc(doc, df_country, f"{country_name} Data")
-add_table_to_doc(doc, df_non_country, f"Non-{country_name} Data")
+# Add both tables
+add_table_with_heading_row(doc, df_country, f"{country_name} Data")
+add_table_with_heading_row(doc, df_non_country, f"Non-{country_name} Data")
 
+# Save document
 doc.save("Esomeprazole_Exposure.docx")
 print("✅ Word document saved as 'Esomeprazole_Exposure.docx'")
