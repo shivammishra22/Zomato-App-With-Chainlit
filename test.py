@@ -3,11 +3,10 @@ import re
 import pandas as pd
 from docx import Document
 
-# ----------------- TABLE EXTRACTION ----------------- #
+# === STEP 1: Extract table from DOCX and save to Excel ===
 def extract_specific_table(docx_path, keywords):
     doc = Document(docx_path)
     matched_table = None
-
     for table in doc.tables:
         for row in table.rows:
             row_text = [cell.text.strip() for cell in row.cells]
@@ -16,11 +15,8 @@ def extract_specific_table(docx_path, keywords):
                 break
         if matched_table:
             break
-
     if matched_table:
-        extracted_data = []
-        for row in matched_table.rows:
-            extracted_data.append([cell.text.strip() for cell in row.cells])
+        extracted_data = [[cell.text.strip() for cell in row.cells] for row in matched_table.rows]
         if len(extracted_data) > 1 and extracted_data[0] == extracted_data[1]:
             extracted_data.pop(1)
         return extracted_data
@@ -32,12 +28,12 @@ def save_table_to_excel(table_data, excel_path):
     os.makedirs(os.path.dirname(excel_path), exist_ok=True)
     df = pd.DataFrame(table_data[1:], columns=table_data[0])
     df.to_excel(excel_path, sheet_name='Extracted_Table', index=False)
-    print(f"✅ Specific table saved to {excel_path}")
+    print(f"✅ Table saved to Excel: {excel_path}")
+    return excel_path  # Return path for next step
 
-# ----------------- SUMMARY DOCUMENT GENERATION ----------------- #
+# === STEP 2: Generate Summary DOCX from Excel ===
 def generate_summary_doc(excel_path, output_doc_path):
     df = pd.read_excel(excel_path, engine='openpyxl')
-
     columns = pd.MultiIndex.from_tuples([
         ('Molecule/Product', ''), ('Study Number', ''), ('Study Title', ''), ('Test product name', ''),
         ('Active comparator name', ''), ('No. of subjects enrolled', 'Test Product'),
@@ -53,16 +49,8 @@ def generate_summary_doc(excel_path, output_doc_path):
     df_new = df.iloc[2:].copy()
     df_new.reset_index(drop=True, inplace=True)
 
-    columns_to_convert = [
-        ('No. of subjects enrolled', 'Test Product'), ('No. of subjects enrolled', 'Active Comparator'),
-        ('No. of subjects enrolled', 'Placebo'), ('No. of subjects enrolled', 'Total'),
-        ('Gender distribution of subjects enrolled', 'Male'), ('Gender distribution of subjects enrolled', 'Female'),
-        ('Age distribution of subjects enrolled', '<18 years'), ('Age distribution of subjects enrolled', '18-65 years'),
-        ('Age distribution of subjects enrolled', '>65 years'), ('Racial distribution of subjects enrolled', 'Asian'),
-        ('Racial distribution of subjects enrolled', 'Black'), ('Racial distribution of subjects enrolled', 'Caucasian'),
-        ('Racial distribution of subjects enrolled', 'Other'), ('Racial distribution of subjects enrolled', 'Unknown')
-    ]
-    df_new[columns_to_convert] = df_new[columns_to_convert].apply(pd.to_numeric, errors='coerce')
+    numeric_cols = [col for col in columns if col[1]]
+    df_new[numeric_cols] = df_new[numeric_cols].apply(pd.to_numeric, errors='coerce')
 
     target_columns = [
         ('Age distribution of subjects enrolled', '<18 years'),
@@ -89,10 +77,9 @@ def generate_summary_doc(excel_path, output_doc_path):
 
     total_subjects = int(df_new[('No. of subjects enrolled', 'Total')].sum())
     num_studies = len(df_new)
-    age_group = non_zero_columns[0][1] if len(non_zero_columns) > 0 else "Unknown"
+    age_group = non_zero_columns[0][1] if non_zero_columns else "Unknown"
     gender_group = 'Male' if df_new[('Gender distribution of subjects enrolled', 'Male')].sum() > 0 else 'Female'
     medicine_name = "levetiracetam"
-
     summary_text = (
         f"Jubilant as MAH has not conducted any Clinical Trials. However, Jubilant has conducted {num_studies} BA/BE study with {medicine_name} till the DLP of the PSUR 30-Nov-2024 "
         f"and cumulative subject exposure in the completed clinical trial were {total_subjects} subjects.\n\n"
@@ -100,10 +87,12 @@ def generate_summary_doc(excel_path, output_doc_path):
         f"Cumulative subject exposure to {medicine_name} in BA/BE studies is given in the table below:"
     )
     doc.add_paragraph(summary_text)
+    os.makedirs(os.path.dirname(output_doc_path), exist_ok=True)
     doc.save(output_doc_path)
-    print(f"✅ Summary document saved to {output_doc_path}")
+    print(f"✅ Summary document saved to: {output_doc_path}")
+    return output_doc_path  # Return for merging
 
-# ----------------- CLEAN FINAL TABLE FILE ----------------- #
+# === STEP 3: Clean original DOCX ===
 def delete_tables_with_keywords(doc, keywords):
     tables_to_delete = []
     for table in doc.tables:
@@ -137,7 +126,7 @@ def clear_text(doc):
     for para in doc.paragraphs:
         para.clear()
 
-def process_document(doc_path, keywords, stop_line):
+def process_document(doc_path, keywords, stop_line, output_cleaned_path):
     doc = Document(doc_path)
     delete_tables_with_keywords(doc, keywords)
     extracted_text = extract_text_before_stop_line(doc, stop_line)
@@ -145,38 +134,44 @@ def process_document(doc_path, keywords, stop_line):
         delete_multiple_paragraphs(doc, extracted_text)
     remove_blank_paragraphs(doc)
     clear_text(doc)
-    final_path = os.path.join(os.path.dirname(doc_path), "final_Table.docx")
-    doc.save(final_path)
-    print(f"✅ Document saved to: {final_path}")
+    os.makedirs(os.path.dirname(output_cleaned_path), exist_ok=True)
+    doc.save(output_cleaned_path)
+    print(f"✅ Cleaned document saved to: {output_cleaned_path}")
+    return output_cleaned_path
 
-# ----------------- MERGE DOCUMENTS ----------------- #
-def merge_documents(doc1_path, doc2_path, output_path):
+# === STEP 4: Merge two documents ===
+def merge_documents(doc1_path, doc2_path, merged_path):
     doc1 = Document(doc1_path)
     doc2 = Document(doc2_path)
-    merged_doc = Document()
-
+    merged = Document()
     for element in doc1.element.body:
-        merged_doc.element.body.append(element)
+        merged.element.body.append(element)
     for element in doc2.element.body:
-        merged_doc.element.body.append(element)
+        merged.element.body.append(element)
+    merged.save(merged_path)
+    print(f"✅ Documents merged to: {merged_path}")
 
-    merged_doc.save(output_path)
-    print("✅ Documents merged successfully.")
-
-# ----------------- MAIN EXECUTION ----------------- #
+# === MAIN EXECUTION ===
 if __name__ == "__main__":
-    keywords = ["Molecular Product", "Study Number", "Test Product Name", "Active comparator name", "TestProduct", "Active Comparator", "Placebo", "Total"]
+    # Base docx path
+    docx_path = r"C:\Users\shivam.mishra2\Downloads\embedding\01PSUR\Data request form.docx"
+    base_dir = os.path.dirname(docx_path).replace("embedding\\01PSUR", "New_Psur_File")
+    os.makedirs(base_dir, exist_ok=True)
+
+    excel_path = os.path.join(base_dir, "intial_table1.xlsx")
+    section5_path = os.path.join(base_dir, "Section5.docx")
+    final_table_path = os.path.join(base_dir, "final_Table.docx")
+    merged_path = os.path.join(base_dir, "mergedFINAL_document.docx")
+
+    # Keywords
+    table_keywords = ["Molecular Product", "Study Number", "Test Product Name", "Active comparator name", "TestProduct", "Active Comparator", "Placebo", "Total"]
+    delete_keywords = ["Country", "Signal term"]
     stop_line = "Pooled literature Data: PVG Department"
 
-    docx_input = r"C:\Users\shivam.mishra2\Downloads\embedding\01PSUR\Data request form.docx"
-    excel_output = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\intial_table1.xlsx"
-    summary_doc_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\Section5.docx"
-    cleaned_doc_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\final_Table.docx"
-    merged_output_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\mergedFINAL_document.docx"
-
-    table_data = extract_specific_table(docx_input, keywords)
+    # Run all steps
+    table_data = extract_specific_table(docx_path, table_keywords)
     if table_data:
-        save_table_to_excel(table_data, excel_output)
-        generate_summary_doc(excel_output, summary_doc_path)
-        process_document(summary_doc_path, keywords=["Country", "Signal term"], stop_line=stop_line)
-        merge_documents(summary_doc_path, cleaned_doc_path, merged_output_path)
+        excel_generated = save_table_to_excel(table_data, excel_path)
+        section5_generated = generate_summary_doc(excel_generated, section5_path)
+        final_cleaned = process_document(docx_path, delete_keywords, stop_line, final_table_path)
+        merge_documents(section5_generated, final_cleaned, merged_path)
