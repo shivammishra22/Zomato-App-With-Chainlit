@@ -152,7 +152,7 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
 # === MAIN EXECUTION ===
 
 if __name__ == "__main__":
-    docx_path = r"C:\Users\shivam.mishra2\Downloads\Data request form.docx"
+    docx_path = r"C:\Users\shivam.mishra2\Downloads\ALL_PSUR_File\PSUR_all _Data\Olanzapine PSUR_South Africa_29-Sep-17 to 31-Mar-25\Draft\DRA\Data request form_olanzapine.docx"
     search_text = "Cumulative sales data sale required"
     excel_output_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\marketing_exposure_tables.xlsx"
 
