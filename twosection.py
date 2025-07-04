@@ -1,112 +1,154 @@
 import os
 import re
 import pandas as pd
+import numpy as np
 from docx import Document
 
-# === STEP 1: Extract specific table from DOCX and save to Excel ===
-def extract_specific_table(docx_path, keywords):
-    doc = Document(docx_path)
-    matched_table = None
-    for table in doc.tables:
-        for row in table.rows:
-            row_text = [cell.text.strip() for cell in row.cells]
-            if any(keyword in cell for cell in row_text for keyword in keywords):
-                matched_table = table
-                break
-        if matched_table:
+def extract_table_after_text(doc, search_text):
+    pattern = re.compile(re.escape(search_text), re.IGNORECASE)
+    found_index = None
+
+    for i, para in enumerate(doc.paragraphs):
+        if pattern.search(para.text):
+            found_index = i
             break
-    if matched_table:
-        extracted_data = [[cell.text.strip() for cell in row.cells] for row in matched_table.rows]
-        if len(extracted_data) > 1 and extracted_data[0] == extracted_data[1]:
-            extracted_data.pop(1)
-        return extracted_data
+
+    if found_index is None:
+        print(f"❌ Text not found: {search_text}")
+        return None  # Changed from [] to None for clarity
+
+    para_counter = 0
+    table_counter = 0
+    for block in doc.element.body:
+        if block.tag.endswith('p'):
+            para_counter += 1
+        elif block.tag.endswith('tbl'):
+            if para_counter > found_index:
+                table = doc.tables[table_counter]
+                break
+            table_counter += 1
     else:
-        print("❌ No matching table found.")
-        return []
+        print(f"❌ No table found after: {search_text}")
+        return None
+
+    table_data = []
+    for row in table.rows:
+        table_data.append([cell.text.strip() for cell in row.cells])
+
+    if len(table_data) > 1 and table_data[0] == table_data[1]:
+        table_data.pop(1)
+
+    return table_data
 
 def save_table_to_excel(table_data, excel_path):
     os.makedirs(os.path.dirname(excel_path), exist_ok=True)
     df = pd.DataFrame(table_data[1:], columns=table_data[0])
-    df.to_excel(excel_path, sheet_name='Extracted_Table', index=False)
-    print(f"✅ Table saved to Excel: {excel_path}")
-    return excel_path  # Pass path dynamically
+    df.to_excel(excel_path, index=False)
+    print(f"✅ Table saved to: {excel_path}")
 
-# === STEP 2: Generate Summary DOCX from Excel ===
-def generate_summary_doc(excel_path, output_doc_path):
+def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, medicine, place, date):
     df = pd.read_excel(excel_path, engine='openpyxl')
-    columns = pd.MultiIndex.from_tuples([
-        ('Molecule/Product', ''), ('Study Number', ''), ('Study Title', ''), ('Test product name', ''),
-        ('Active comparator name', ''), ('No. of subjects enrolled', 'Test Product'),
-        ('No. of subjects enrolled', 'Active Comparator'), ('No. of subjects enrolled', 'Placebo'),
-        ('No. of subjects enrolled', 'Total'), ('Gender distribution of subjects enrolled', 'Male'),
-        ('Gender distribution of subjects enrolled', 'Female'), ('Age distribution of subjects enrolled', '<18 years'),
-        ('Age distribution of subjects enrolled', '18-65 years'), ('Age distribution of subjects enrolled', '>65 years'),
-        ('Racial distribution of subjects enrolled', 'Asian'), ('Racial distribution of subjects enrolled', 'Black'),
-        ('Racial distribution of subjects enrolled', 'Caucasian'), ('Racial distribution of subjects enrolled', 'Other'),
-        ('Racial distribution of subjects enrolled', 'Unknown')
-    ])
-    df.columns = columns
-    df_new = df.iloc[2:].copy()
-    df_new.reset_index(drop=True, inplace=True)
 
-    numeric_cols = [col for col in columns if col[1]]
-    df_new[numeric_cols] = df_new[numeric_cols].apply(pd.to_numeric, errors='coerce')
+    df["Strength in mg"] = df["Strength in mg"].astype(str).str.replace("mg", "").str.strip()
+    df["Strength in mg"] = pd.to_numeric(df["Strength in mg"], errors='coerce')
 
-    target_columns = [
-        ('Age distribution of subjects enrolled', '<18 years'),
-        ('Age distribution of subjects enrolled', '18-65 years'),
-        ('Age distribution of subjects enrolled', '>65 years'),
-        ('Racial distribution of subjects enrolled', 'Asian'),
-        ('Racial distribution of subjects enrolled', 'Black'),
-        ('Racial distribution of subjects enrolled', 'Caucasian')
-    ]
-    non_zero_columns = [col for col in target_columns if df_new[col].sum() != 0]
+    pack_column = next((col for col in ["Pack", "Packs"] if col in df.columns), None)
+    if pack_column:
+        df[pack_column] = pd.to_numeric(df[pack_column].astype(str).str.replace(",", "").str.extract(r'(\d+)')[0], errors='coerce').fillna(0).astype(int)
+
+    if "Pack size" in df.columns:
+        pack_size_extracted = df["Pack size"].astype(str).str.extract(r'(\d+)\s*[xX]\s*(\d+)')
+        df["Pack size"] = pd.to_numeric(pack_size_extracted[0], errors='coerce').fillna(1).astype(int) * pd.to_numeric(pack_size_extracted[1], errors='coerce').fillna(1).astype(int)
+
+    unit_col = "Number of tablets / Capsules/Injections"
+    df[unit_col] = df[unit_col].astype(str).str.replace(",", "").str.split(":").str[-1].str.strip()
+    df[unit_col] = pd.to_numeric(df[unit_col], errors='coerce')
+
+    df["Delivered quantity (mg)"] = pd.to_numeric(df["Delivered quantity (mg)"].astype(str).str.replace(",", ""), errors='coerce')
+    df.rename(columns={"Product": "Molecule"}, inplace=True)
+
+    df["Sales Figure (mg) or period/Volume of sales (in mg)"] = df[unit_col] * df["Strength in mg"]
+    df["Patients Exposure (PTY) for period"] = df["Sales Figure (mg) or period/Volume of sales (in mg)"] / (ddd_value * 365)
+    df["Patients Exposure (PTY) for period"] = df["Patients Exposure (PTY) for period"].round(0)
+
+    df_country = df[df["Country"] == country_name].copy()
+    df_non_country = df[df["Country"] != country_name].copy()
+
+    def create_clean_total_row(dataframe):
+        total = dataframe["Patients Exposure (PTY) for period"].sum()
+        total_row = {col: "" for col in dataframe.columns}
+        total_row["Country"] = "Total"
+        total_row["Patients Exposure (PTY) for period"] = int(total)
+        return pd.DataFrame([total_row])
+
+    df_country = pd.concat([df_country, create_clean_total_row(df_country)], ignore_index=True)
+    df_non_country = pd.concat([df_non_country, create_clean_total_row(df_non_country)], ignore_index=True)
+
+    df_country.fillna("", inplace=True)
+    df_non_country.fillna("", inplace=True)
 
     doc = Document()
-    doc.add_heading('1 Jubilant Generics Limited', level=1)
-    doc.add_heading('2 Levetiracetam Periodic Safety Update Report', level=2)
-    doc.add_paragraph('Reporting period: 30-Nov-2024 to 30-Nov-2024')
-    doc.add_heading('5 ESTIMATED EXPOSURE AND USE PATTERNS', level=2)
-    doc.add_heading('5.1 General considerations', level=3)
-    doc.add_paragraph(
-        'For clinical trials patient exposure can be accurately calculated because dosage and duration of treatment are clearly known. '
-        'In terms of post marketing use patient exposure cannot be accurately calculated for certain reasons such as varying dosage and '
-        'duration of treatment as well as changing or unknown patient compliance.'
-    )
-    doc.add_heading('5.2 Cumulative Subject Exposure in Clinical Trials', level=3)
+    doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
 
-    total_subjects = int(df_new[('No. of subjects enrolled', 'Total')].sum())
-    num_studies = len(df_new)
-    age_group = non_zero_columns[0][1] if non_zero_columns else "Unknown"
-    gender_group = 'Male' if df_new[('Gender distribution of subjects enrolled', 'Male')].sum() > 0 else 'Female'
-    medicine_name = "levetiracetam"
+    country_total_exposure = df_country[df_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
+    non_country_total_exposure = df_non_country[df_non_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
+    total_exposure = country_total_exposure + non_country_total_exposure
+
     summary_text = (
-        f"Jubilant as MAH has not conducted any Clinical Trials. However, Jubilant has conducted {num_studies} BA/BE study with {medicine_name} till the DLP of the PSUR 30-Nov-2024 "
-        f"and cumulative subject exposure in the completed clinical trial were {total_subjects} subjects.\n\n"
-        f"Of these {total_subjects}, all were {gender_group} subjects of age distribution between {age_group} years. "
-        f"Cumulative subject exposure to {medicine_name} in BA/BE studies is given in the table below:"
+        f"The MAH obtained initial MA for their generic formulation of {medicine} in {place} on {date}.\n"
+        f"The post-authorization exposure to {medicine} during the cumulative period was {int(total_exposure)} patients "
+        f"({place}: {int(country_total_exposure)} and Non {place}: {int(non_country_total_exposure)}) treatment days approximately and presented in Table 3."
     )
     doc.add_paragraph(summary_text)
-    os.makedirs(os.path.dirname(output_doc_path), exist_ok=True)
-    doc.save(output_doc_path)
-    print(f"✅ Summary document saved to: {output_doc_path}")
+
+    def add_table_with_data(doc, dataframe, title):
+        doc.add_heading(title, level=2)
+        table = doc.add_table(rows=1, cols=len(dataframe.columns))
+        table.style = 'Table Grid'
+        hdr_cells = table.rows[0].cells
+        for i, col_name in enumerate(dataframe.columns):
+            hdr_cells[i].text = str(col_name)
+        for _, row in dataframe.iterrows():
+            row_cells = table.add_row().cells
+            for i, item in enumerate(row):
+                row_cells[i].text = str(item)
+
+    add_table_with_data(doc, df_country, f"                                                      {country_name} ")
+    add_table_with_data(doc, df_non_country, f"                                                      Non-{country_name} ")
+
+    doc.save("Esomeprazole_Exposure.docx")
+    print("✅ Word document saved as 'Esomeprazole_Exposure.docx'")
 
 # === MAIN EXECUTION ===
+
 if __name__ == "__main__":
-    # === Input ===
-    docx_path = r"C:\Users\shivam.mishra2\Downloads\embedding\01PSUR\Data request form.docx"
-    keywords = ["Molecular Product", "Study Number", "Test Product Name", "Active comparator name", "TestProduct", "Active Comparator", "Placebo", "Total"]
+    docx_path = r"C:\Users\shivam.mishra2\Downloads\Data request form.docx"
+    search_text = "Cumulative sales data sale required"
+    excel_output_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\marketing_exposure_tables.xlsx"
 
-    # === Dynamically Generate Excel and Output Paths ===
-    base_dir = os.path.dirname(docx_path).replace("embedding\\01PSUR", "New_Psur_File")
-    os.makedirs(base_dir, exist_ok=True)
-    excel_path = os.path.join(base_dir, "intial_table1.xlsx")
-    output_doc_path = os.path.join(base_dir, "Section5.docx")
+    ddd_value = 10
+    country = "South Africa"
+    medicine = "Esomeprazole"
+    place = "South Africa"
+    date = "2020-01-01"
 
-    # === Extract table and save to Excel ===
-    table_data = extract_specific_table(docx_path, keywords)
-    if table_data:
-        dynamic_excel_path = save_table_to_excel(table_data, excel_path)
-
-        # === Pass generated Excel path to summary generator ===
-        generate_summary_doc(dynamic_excel_path, output_doc_path)
+    try:
+        doc = Document(docx_path)
+        table_data = extract_table_after_text(doc, search_text)
+        if table_data:
+            save_table_to_excel(table_data, excel_output_path)
+            calculate_exposure_and_generate_doc(excel_output_path, ddd_value, country, medicine, place, date)
+        else:
+            raise ValueError("Search text or table not found.")
+    except Exception as e:
+        print(f"⚠️ Error: {e}")
+        fallback_doc = Document()
+        fallback_doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
+        placeholder_text = (
+            f"No cumulative and interval patient exposure from marketing experience was available as the MAH "
+            f"has not marketed its product {medicine} in any country since obtaining initial granting of MA "
+            f"till the DLP of this report."
+        )
+        fallback_doc.add_paragraph(placeholder_text)
+        fallback_doc.save("Esomeprazole_Exposure.docx")
+        print("📄 Placeholder Word document saved as 'Esomeprazole_Exposure.docx'")
