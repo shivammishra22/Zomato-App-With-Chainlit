@@ -58,6 +58,14 @@ def generate_fallback_doc(medicine):
     fallback_doc.save("Esomeprazole_Exposure.docx")
     print("📄 Placeholder Word document saved as 'Esomeprazole_Exposure.docx'")
 
+def get_total_patient_exposure(df):
+    if "Patients Exposure (PTY) for period" not in df.columns:
+        print("❌ Column 'Patients Exposure (PTY) for period' not found in DataFrame.")
+        return None
+    total = df["Patients Exposure (PTY) for period"].sum()
+    print(f"🧮 Total Patients Exposure (PTY) for period across all entries: {int(total)}")
+    return total
+
 def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, medicine, place, date):
     df = pd.read_excel(excel_path, engine='openpyxl')
 
@@ -99,7 +107,7 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
     df_country.fillna("", inplace=True)
     df_non_country.fillna("", inplace=True)
 
-    # ✅ Check if South Africa total exposure is zero
+    # ✅ Check if country exposure is zero
     sa_total = df_country[df_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
     if sa_total == 0:
         generate_fallback_doc(medicine)
@@ -136,6 +144,10 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
 
     doc.save("Esomeprazole_Exposure.docx")
     print("✅ Word document saved as 'Esomeprazole_Exposure.docx'")
+
+    # ✅ Show Total Exposure after generating
+    df_combined = pd.concat([df_country, df_non_country], ignore_index=True)
+    get_total_patient_exposure(df_combined)
 
 # === MAIN EXECUTION ===
 
