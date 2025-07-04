@@ -4,42 +4,42 @@ import pandas as pd
 import numpy as np
 from docx import Document
 
-
-class PatientExposureCalculator:
-    def __init__(self, ddd_value, country, medicine, place, date):
+class ExposureReportGenerator:
+    def __init__(self, docx_path, search_text, ddd_value, country, medicine, place, date):
+        self.docx_path = docx_path
+        self.search_text = search_text
         self.ddd_value = ddd_value
         self.country = country
         self.medicine = medicine
         self.place = place
         self.date = date
-        self.df_combined = pd.DataFrame()
-        self.total_exposure_value = 0
+        self.doc = Document(docx_path)
 
-    def extract_table_after_text(self, doc, search_text):
-        pattern = re.compile(re.escape(search_text), re.IGNORECASE)
+    def extract_table_after_text(self):
+        pattern = re.compile(re.escape(self.search_text), re.IGNORECASE)
         found_index = None
 
-        for i, para in enumerate(doc.paragraphs):
+        for i, para in enumerate(self.doc.paragraphs):
             if pattern.search(para.text):
                 found_index = i
                 break
 
         if found_index is None:
-            print(f"❌ Text not found: {search_text}")
+            print(f"❌ Text not found: {self.search_text}")
             return None
 
         para_counter = 0
         table_counter = 0
-        for block in doc.element.body:
+        for block in self.doc.element.body:
             if block.tag.endswith('p'):
                 para_counter += 1
             elif block.tag.endswith('tbl'):
                 if para_counter > found_index:
-                    table = doc.tables[table_counter]
+                    table = self.doc.tables[table_counter]
                     break
                 table_counter += 1
         else:
-            print(f"❌ No table found after: {search_text}")
+            print(f"❌ No table found after: {self.search_text}")
             return None
 
         table_data = []
@@ -66,8 +66,8 @@ class PatientExposureCalculator:
             f"till the DLP of this report."
         )
         fallback_doc.add_paragraph(placeholder_text)
-        fallback_doc.save(f"{self.medicine}_Exposure.docx")
-        print(f"📄 Placeholder Word document saved as '{self.medicine}_Exposure.docx'")
+        fallback_doc.save("Esomeprazole_Exposure.docx")
+        print("📄 Placeholder Word document saved as 'Esomeprazole_Exposure.docx'")
 
     def calculate_exposure_and_generate_doc(self, excel_path):
         df = pd.read_excel(excel_path, engine='openpyxl')
@@ -77,33 +77,22 @@ class PatientExposureCalculator:
 
         pack_column = next((col for col in ["Pack", "Packs"] if col in df.columns), None)
         if pack_column:
-            df[pack_column] = pd.to_numeric(
-                df[pack_column].astype(str).str.replace(",", "").str.extract(r'(\d+)')[0],
-                errors='coerce'
-            ).fillna(0).astype(int)
+            df[pack_column] = pd.to_numeric(df[pack_column].astype(str).str.replace(",", "").str.extract(r'(\d+)')[0], errors='coerce').fillna(0).astype(int)
 
         if "Pack size" in df.columns:
             pack_size_extracted = df["Pack size"].astype(str).str.extract(r'(\d+)\s*[xX]\s*(\d+)')
-            df["Pack size"] = (
-                pd.to_numeric(pack_size_extracted[0], errors='coerce').fillna(1).astype(int) *
-                pd.to_numeric(pack_size_extracted[1], errors='coerce').fillna(1).astype(int)
-            )
+            df["Pack size"] = pd.to_numeric(pack_size_extracted[0], errors='coerce').fillna(1).astype(int) * pd.to_numeric(pack_size_extracted[1], errors='coerce').fillna(1).astype(int)
 
         unit_col = "Number of tablets / Capsules/Injections"
         df[unit_col] = df[unit_col].astype(str).str.replace(",", "").str.split(":").str[-1].str.strip()
         df[unit_col] = pd.to_numeric(df[unit_col], errors='coerce')
 
-        df["Delivered quantity (mg)"] = pd.to_numeric(
-            df["Delivered quantity (mg)"].astype(str).str.replace(",", ""),
-            errors='coerce'
-        )
-
+        df["Delivered quantity (mg)"] = pd.to_numeric(df["Delivered quantity (mg)"].astype(str).str.replace(",", ""), errors='coerce')
         df.rename(columns={"Product": "Molecule"}, inplace=True)
 
         df["Sales Figure (mg) or period/Volume of sales (in mg)"] = df[unit_col] * df["Strength in mg"]
-        df["Patients Exposure (PTY) for period"] = (
-            df["Sales Figure (mg) or period/Volume of sales (in mg)"] / (self.ddd_value * 365)
-        ).round(0)
+        df["Patients Exposure (PTY) for period"] = df["Sales Figure (mg) or period/Volume of sales (in mg)"] / (self.ddd_value * 365)
+        df["Patients Exposure (PTY) for period"] = df["Patients Exposure (PTY) for period"].round(0)
 
         df_country = df[df["Country"] == self.country].copy()
         df_non_country = df[df["Country"] != self.country].copy()
@@ -131,7 +120,6 @@ class PatientExposureCalculator:
 
         non_country_total = df_non_country[df_non_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
         total_exposure = sa_total + non_country_total
-        self.total_exposure_value = int(total_exposure)
 
         summary_text = (
             f"The MAH obtained initial MA for their generic formulation of {self.medicine} in {self.place} on {self.date}.\n"
@@ -140,25 +128,54 @@ class PatientExposureCalculator:
         )
         doc.add_paragraph(summary_text)
 
-        def add_table_with_data(doc, dataframe, title):
-            doc.add_heading(title, level=2)
-            table = doc.add_table(rows=1, cols=len(dataframe.columns))
-            table.style = 'Table Grid'
-            hdr_cells = table.rows[0].cells
-            for i, col_name in enumerate(dataframe.columns):
-                hdr_cells[i].text = str(col_name)
-            for _, row in dataframe.iterrows():
-                row_cells = table.add_row().cells
-                for i, item in enumerate(row):
-                    row_cells[i].text = str(item)
+        self.add_table_with_data(doc, df_country, f"                                                      {self.country} ")
+        self.add_table_with_data(doc, df_non_country, f"                                                      Non-{self.country} ")
 
-        add_table_with_data(doc, df_country, f"{self.country} ")
-        add_table_with_data(doc, df_non_country, f"Non-{self.country} ")
+        doc.save("Esomeprazole_Exposure.docx")
+        print("✅ Word document saved as 'Esomeprazole_Exposure.docx'")
 
-        doc.save(f"{self.medicine}_Exposure.docx")
-        print(f"✅ Word document saved as '{self.medicine}_Exposure.docx'")
+    def add_table_with_data(self, doc, dataframe, title):
+        doc.add_heading(title, level=2)
+        table = doc.add_table(rows=1, cols=len(dataframe.columns))
+        table.style = 'Table Grid'
+        hdr_cells = table.rows[0].cells
+        for i, col_name in enumerate(dataframe.columns):
+            hdr_cells[i].text = str(col_name)
+        for _, row in dataframe.iterrows():
+            row_cells = table.add_row().cells
+            for i, item in enumerate(row):
+                row_cells[i].text = str(item)
 
-        self.df_combined = pd.concat([df_country, df_non_country], ignore_index=True)
+    def run(self, excel_output_path):
+        try:
+            if not os.path.exists(self.docx_path):
+                raise FileNotFoundError(f"File not found: {self.docx_path}")
+            table_data = self.extract_table_after_text()
+            if table_data:
+                self.save_table_to_excel(table_data, excel_output_path)
+                self.calculate_exposure_and_generate_doc(excel_output_path)
+            else:
+                print("⚠️ Table not found after search text. Generating fallback document.")
+                self.generate_fallback_doc()
+        except Exception as e:
+            print(f"⚠️ Error: {e}")
+            self.generate_fallback_doc()
 
-    def get_total_patient_exposure(self):
-        return self.total_exposure_value
+
+# === EXAMPLE USAGE ===
+if __name__ == "__main__":
+    docx_path = r"C:\Users\shivam.mishra2\Downloads\ALL_PSUR_File\PSUR_all _Data\Olanzapine PSUR_South Africa_29-Sep-17 to 31-Mar-25\Draft\DRA\Data request form_olanzapine.docx"
+    search_text = "Cumulative sales data sale required"
+    excel_output_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\marketing_exposure_tables.xlsx"
+
+    generator = ExposureReportGenerator(
+        docx_path=docx_path,
+        search_text=search_text,
+        ddd_value=10,
+        country="South Africa",
+        medicine="Esomeprazole",
+        place="South Africa",
+        date="2020-01-01"
+    )
+
+    generator.run(excel_output_path)
