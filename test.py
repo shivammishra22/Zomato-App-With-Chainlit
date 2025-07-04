@@ -4,8 +4,6 @@ import pandas as pd
 import numpy as np
 from docx import Document
 
-# === PART 1: Extract Table From DOCX and Save to Excel ===
-
 def extract_table_after_text(doc, search_text):
     pattern = re.compile(re.escape(search_text), re.IGNORECASE)
     found_index = None
@@ -17,7 +15,7 @@ def extract_table_after_text(doc, search_text):
 
     if found_index is None:
         print(f"❌ Text not found: {search_text}")
-        return []
+        return None
 
     para_counter = 0
     table_counter = 0
@@ -31,7 +29,7 @@ def extract_table_after_text(doc, search_text):
             table_counter += 1
     else:
         print(f"❌ No table found after: {search_text}")
-        return []
+        return None
 
     table_data = []
     for row in table.rows:
@@ -48,12 +46,29 @@ def save_table_to_excel(table_data, excel_path):
     df.to_excel(excel_path, index=False)
     print(f"✅ Table saved to: {excel_path}")
 
-# === PART 2: Exposure Calculation and Word Report ===
+def generate_fallback_doc(medicine):
+    fallback_doc = Document()
+    fallback_doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
+    placeholder_text = (
+        f"No cumulative and interval patient exposure from marketing experience was available as the MAH "
+        f"has not marketed its product {medicine} in any country since obtaining initial granting of MA "
+        f"till the DLP of this report."
+    )
+    fallback_doc.add_paragraph(placeholder_text)
+    fallback_doc.save("Esomeprazole_Exposure.docx")
+    print("📄 Placeholder Word document saved as 'Esomeprazole_Exposure.docx'")
+
+def get_total_patient_exposure(df):
+    if "Patients Exposure (PTY) for period" not in df.columns:
+        print("❌ Column 'Patients Exposure (PTY) for period' not found in DataFrame.")
+        return None
+    total = df["Patients Exposure (PTY) for period"].sum()
+    print(f"🧮 Total Patients Exposure (PTY) for period across all entries: {int(total)}")
+    return total
 
 def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, medicine, place, date):
     df = pd.read_excel(excel_path, engine='openpyxl')
 
-    # Clean and prepare data
     df["Strength in mg"] = df["Strength in mg"].astype(str).str.replace("mg", "").str.strip()
     df["Strength in mg"] = pd.to_numeric(df["Strength in mg"], errors='coerce')
 
@@ -72,7 +87,6 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
     df["Delivered quantity (mg)"] = pd.to_numeric(df["Delivered quantity (mg)"].astype(str).str.replace(",", ""), errors='coerce')
     df.rename(columns={"Product": "Molecule"}, inplace=True)
 
-    # Exposure calculation
     df["Sales Figure (mg) or period/Volume of sales (in mg)"] = df[unit_col] * df["Strength in mg"]
     df["Patients Exposure (PTY) for period"] = df["Sales Figure (mg) or period/Volume of sales (in mg)"] / (ddd_value * 365)
     df["Patients Exposure (PTY) for period"] = df["Patients Exposure (PTY) for period"].round(0)
@@ -93,18 +107,23 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
     df_country.fillna("", inplace=True)
     df_non_country.fillna("", inplace=True)
 
-    # Create Word Document
+    # ✅ Check if country exposure is zero
+    sa_total = df_country[df_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
+    if sa_total == 0:
+        generate_fallback_doc(medicine)
+        return
+
+    # ✅ Proceed to generate full doc only if total > 0
     doc = Document()
     doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
 
-    country_total_exposure = df_country[df_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
-    non_country_total_exposure = df_non_country[df_non_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
-    total_exposure = country_total_exposure + non_country_total_exposure
+    non_country_total = df_non_country[df_non_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
+    total_exposure = sa_total + non_country_total
 
     summary_text = (
         f"The MAH obtained initial MA for their generic formulation of {medicine} in {place} on {date}.\n"
         f"The post-authorization exposure to {medicine} during the cumulative period was {int(total_exposure)} patients "
-        f"({place}: {int(country_total_exposure)} and Non {place}: {int(non_country_total_exposure)}) treatment days approximately and presented in Table 3."
+        f"({place}: {int(sa_total)} and Non {place}: {int(non_country_total)}) treatment days approximately and presented in Table 3."
     )
     doc.add_paragraph(summary_text)
 
@@ -120,29 +139,40 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
             for i, item in enumerate(row):
                 row_cells[i].text = str(item)
 
-    add_table_with_data(doc, df_country, f"{country_name} Data")
-    add_table_with_data(doc, df_non_country, f"Non-{country_name} Data")
+    add_table_with_data(doc, df_country, f"                                                      {country_name} ")
+    add_table_with_data(doc, df_non_country, f"                                                      Non-{country_name} ")
 
     doc.save("Esomeprazole_Exposure.docx")
     print("✅ Word document saved as 'Esomeprazole_Exposure.docx'")
 
+    # ✅ Show Total Exposure after generating
+    df_combined = pd.concat([df_country, df_non_country], ignore_index=True)
+    get_total_patient_exposure(df_combined)
+
 # === MAIN EXECUTION ===
 
 if __name__ == "__main__":
-    docx_path = r"C:\Users\shivam.mishra2\Downloads\ALL_PSUR_File\PSUR_all.docx"
-    search_text = "Table 3: Patient Exposure from Marketing Experience"  # Adjust as needed
-    excel_output_path = r"C:\Users\shivam.mishra2\Downloads\ALL_PSUR_File\marketing_exposure_tables.xlsx"
+    docx_path = r"C:\Users\shivam.mishra2\Downloads\Data request form.docx"
+    search_text = "Cumulative sales data sale required"
+    excel_output_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\marketing_exposure_tables.xlsx"
 
-    doc = Document(docx_path)
-    table_data = extract_table_after_text(doc, search_text)
-    if table_data:
-        save_table_to_excel(table_data, excel_output_path)
+    ddd_value = 10
+    country = "South Africa"
+    medicine = "Esomeprazole"
+    place = "South Africa"
+    date = "2020-01-01"
 
-        # Static values for now — you can replace them with input() if needed
-        ddd_value = 10
-        country = "South Africa"
-        medicine = "Esomeprazole"
-        place = "South Africa"
-        date = "2020-01-01"
-
-        calculate_exposure_and_generate_doc(excel_output_path, ddd_value, country, medicine, place, date)
+    try:
+        if not os.path.exists(docx_path):
+            raise FileNotFoundError(f"File not found: {docx_path}")
+        doc = Document(docx_path)
+        table_data = extract_table_after_text(doc, search_text)
+        if table_data:
+            save_table_to_excel(table_data, excel_output_path)
+            calculate_exposure_and_generate_doc(excel_output_path, ddd_value, country, medicine, place, date)
+        else:
+            print("⚠️ Table not found after search text. Generating fallback document.")
+            generate_fallback_doc(medicine)
+    except Exception as e:
+        print(f"⚠️ Error: {e}")
+        generate_fallback_doc(medicine)
