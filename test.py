@@ -58,14 +58,6 @@ def generate_fallback_doc(medicine):
     fallback_doc.save("Esomeprazole_Exposure.docx")
     print("📄 Placeholder Word document saved as 'Esomeprazole_Exposure.docx'")
 
-def get_total_patient_exposure(df):
-    if "Patients Exposure (PTY) for period" not in df.columns:
-        print("❌ Column 'Patients Exposure (PTY) for period' not found in DataFrame.")
-        return None
-    total = df["Patients Exposure (PTY) for period"].sum()
-    print(f"🧮 Total Patients Exposure (PTY) for period across all entries: {int(total)}")
-    return total
-
 def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, medicine, place, date):
     df = pd.read_excel(excel_path, engine='openpyxl')
 
@@ -101,29 +93,39 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
         total_row["Patients Exposure (PTY) for period"] = int(total)
         return pd.DataFrame([total_row])
 
-    df_country = pd.concat([df_country, create_clean_total_row(df_country)], ignore_index=True)
-    df_non_country = pd.concat([df_non_country, create_clean_total_row(df_non_country)], ignore_index=True)
+    # Add total rows
+    df_country_total_row = create_clean_total_row(df_country)
+    df_non_country_total_row = create_clean_total_row(df_non_country)
+
+    # Append total to dataframes
+    df_country = pd.concat([df_country, df_country_total_row], ignore_index=True)
+    df_non_country = pd.concat([df_non_country, df_non_country_total_row], ignore_index=True)
 
     df_country.fillna("", inplace=True)
     df_non_country.fillna("", inplace=True)
 
-    # ✅ Check if country exposure is zero
-    sa_total = df_country[df_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
+    # ✅ Print both totals
+    sa_total = df_country_total_row["Patients Exposure (PTY) for period"].values[0]
+    non_sa_total = df_non_country_total_row["Patients Exposure (PTY) for period"].values[0]
+    combined_total = int(sa_total) + int(non_sa_total)
+
+    print(f"📍 Total Exposure for {country_name}: {int(sa_total)}")
+    print(f"📍 Total Exposure for Non-{country_name}: {int(non_sa_total)}")
+    print(f"📊 Combined Total Exposure: {combined_total}")
+
+    # Check for fallback
     if sa_total == 0:
         generate_fallback_doc(medicine)
         return
 
-    # ✅ Proceed to generate full doc only if total > 0
+    # Proceed to generate Word doc
     doc = Document()
     doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
 
-    non_country_total = df_non_country[df_non_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
-    total_exposure = sa_total + non_country_total
-
     summary_text = (
         f"The MAH obtained initial MA for their generic formulation of {medicine} in {place} on {date}.\n"
-        f"The post-authorization exposure to {medicine} during the cumulative period was {int(total_exposure)} patients "
-        f"({place}: {int(sa_total)} and Non {place}: {int(non_country_total)}) treatment days approximately and presented in Table 3."
+        f"The post-authorization exposure to {medicine} during the cumulative period was {combined_total} patients "
+        f"({place}: {int(sa_total)} and Non {place}: {int(non_sa_total)}) treatment days approximately and presented in Table 3."
     )
     doc.add_paragraph(summary_text)
 
@@ -145,14 +147,10 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
     doc.save("Esomeprazole_Exposure.docx")
     print("✅ Word document saved as 'Esomeprazole_Exposure.docx'")
 
-    # ✅ Show Total Exposure after generating
-    df_combined = pd.concat([df_country, df_non_country], ignore_index=True)
-    get_total_patient_exposure(df_combined)
-
 # === MAIN EXECUTION ===
 
 if __name__ == "__main__":
-    docx_path = r"C:\Users\shivam.mishra2\Downloads\Data request form.docx"
+    docx_path = r"C:\Users\shivam.mishra2\Downloads\ALL_PSUR_File\PSUR_all _Data\Olanzapine PSUR_South Africa_29-Sep-17 to 31-Mar-25\Draft\DRA\Data request form_olanzapine.docx"
     search_text = "Cumulative sales data sale required"
     excel_output_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\marketing_exposure_tables.xlsx"
 
