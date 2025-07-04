@@ -15,7 +15,7 @@ def extract_table_after_text(doc, search_text):
 
     if found_index is None:
         print(f"❌ Text not found: {search_text}")
-        return None  # Changed from [] to None for clarity
+        return None
 
     para_counter = 0
     table_counter = 0
@@ -119,6 +119,18 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
     doc.save("Esomeprazole_Exposure.docx")
     print("✅ Word document saved as 'Esomeprazole_Exposure.docx'")
 
+def generate_fallback_doc(medicine):
+    fallback_doc = Document()
+    fallback_doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
+    placeholder_text = (
+        f"No cumulative and interval patient exposure from marketing experience was available as the MAH "
+        f"has not marketed its product {medicine} in any country since obtaining initial granting of MA "
+        f"till the DLP of this report."
+    )
+    fallback_doc.add_paragraph(placeholder_text)
+    fallback_doc.save("Esomeprazole_Exposure.docx")
+    print("📄 Placeholder Word document saved as 'Esomeprazole_Exposure.docx'")
+
 # === MAIN EXECUTION ===
 
 if __name__ == "__main__":
@@ -133,22 +145,16 @@ if __name__ == "__main__":
     date = "2020-01-01"
 
     try:
+        if not os.path.exists(docx_path):
+            raise FileNotFoundError(f"File not found: {docx_path}")
         doc = Document(docx_path)
         table_data = extract_table_after_text(doc, search_text)
         if table_data:
             save_table_to_excel(table_data, excel_output_path)
             calculate_exposure_and_generate_doc(excel_output_path, ddd_value, country, medicine, place, date)
         else:
-            raise ValueError("Search text or table not found.")
+            print("⚠️ Table not found after search text. Generating fallback document.")
+            generate_fallback_doc(medicine)
     except Exception as e:
         print(f"⚠️ Error: {e}")
-        fallback_doc = Document()
-        fallback_doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
-        placeholder_text = (
-            f"No cumulative and interval patient exposure from marketing experience was available as the MAH "
-            f"has not marketed its product {medicine} in any country since obtaining initial granting of MA "
-            f"till the DLP of this report."
-        )
-        fallback_doc.add_paragraph(placeholder_text)
-        fallback_doc.save("Esomeprazole_Exposure.docx")
-        print("📄 Placeholder Word document saved as 'Esomeprazole_Exposure.docx'")
+        generate_fallback_doc(medicine)
