@@ -46,6 +46,18 @@ def save_table_to_excel(table_data, excel_path):
     df.to_excel(excel_path, index=False)
     print(f"✅ Table saved to: {excel_path}")
 
+def generate_fallback_doc(medicine):
+    fallback_doc = Document()
+    fallback_doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
+    placeholder_text = (
+        f"No cumulative and interval patient exposure from marketing experience was available as the MAH "
+        f"has not marketed its product {medicine} in any country since obtaining initial granting of MA "
+        f"till the DLP of this report."
+    )
+    fallback_doc.add_paragraph(placeholder_text)
+    fallback_doc.save("Esomeprazole_Exposure.docx")
+    print("📄 Placeholder Word document saved as 'Esomeprazole_Exposure.docx'")
+
 def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, medicine, place, date):
     df = pd.read_excel(excel_path, engine='openpyxl')
 
@@ -87,17 +99,23 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
     df_country.fillna("", inplace=True)
     df_non_country.fillna("", inplace=True)
 
+    # ✅ Check if South Africa total exposure is zero
+    sa_total = df_country[df_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
+    if sa_total == 0:
+        generate_fallback_doc(medicine)
+        return
+
+    # ✅ Proceed to generate full doc only if total > 0
     doc = Document()
     doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
 
-    country_total_exposure = df_country[df_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
-    non_country_total_exposure = df_non_country[df_non_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
-    total_exposure = country_total_exposure + non_country_total_exposure
+    non_country_total = df_non_country[df_non_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
+    total_exposure = sa_total + non_country_total
 
     summary_text = (
         f"The MAH obtained initial MA for their generic formulation of {medicine} in {place} on {date}.\n"
         f"The post-authorization exposure to {medicine} during the cumulative period was {int(total_exposure)} patients "
-        f"({place}: {int(country_total_exposure)} and Non {place}: {int(non_country_total_exposure)}) treatment days approximately and presented in Table 3."
+        f"({place}: {int(sa_total)} and Non {place}: {int(non_country_total)}) treatment days approximately and presented in Table 3."
     )
     doc.add_paragraph(summary_text)
 
@@ -118,18 +136,6 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
 
     doc.save("Esomeprazole_Exposure.docx")
     print("✅ Word document saved as 'Esomeprazole_Exposure.docx'")
-
-def generate_fallback_doc(medicine):
-    fallback_doc = Document()
-    fallback_doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
-    placeholder_text = (
-        f"No cumulative and interval patient exposure from marketing experience was available as the MAH "
-        f"has not marketed its product {medicine} in any country since obtaining initial granting of MA "
-        f"till the DLP of this report."
-    )
-    fallback_doc.add_paragraph(placeholder_text)
-    fallback_doc.save("Esomeprazole_Exposure.docx")
-    print("📄 Placeholder Word document saved as 'Esomeprazole_Exposure.docx'")
 
 # === MAIN EXECUTION ===
 
