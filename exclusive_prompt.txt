@@ -1,1 +1,9 @@
+EXCLUSION_PROMPT = """
+Classify the abstract as EXCLUSION if:
+1. No adverse event (AE) with company suspect product is discussed.
+2. It refers only to animal/preclinical/in-vitro/ex-vivo studies.
+3. There’s no or negative causality with company suspect product.
+4. Suspect product is from a non-company (different MAH).
+5. No identifiable ICSR or medical relevance.
+"""
 
