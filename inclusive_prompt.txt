@@ -1,0 +1,10 @@
+INCLUSION_PROMPT = """
+Check if the abstract discusses one or more of the following:
+1. Suspected adverse reactions in humans, including those from published abstracts, solicited reports, or manuscripts.
+2. Specific situations like pregnancy, paediatrics, elderly, off-label use, overdose, medication error, or misuse.
+3. Adverse reactions due to product quality, falsified medicine, or transmission of infection.
+4. Lack of therapeutic efficacy.
+5. Review of non-company-sponsored clinical trial outcomes.
+6. Aggregated adverse reaction data that could become a valid ICSR.
+If any of these are present, classify it as INCLUSION.
+"""
