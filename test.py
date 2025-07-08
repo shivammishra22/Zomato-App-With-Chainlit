@@ -1,176 +1,75 @@
-import os
-import re
+# classify_with_ollama.py
 import pandas as pd
 import numpy as np
-from docx import Document
+import faiss
+from sentence_transformers import SentenceTransformer
+import subprocess
 
-def extract_table_after_text(doc, search_text):
-    pattern = re.compile(re.escape(search_text), re.IGNORECASE)
-    found_index = None
+# === Load Data ===
+df = pd.read_pickle("metadata.pkl")
+index = faiss.read_index("faiss_index.bin")
+model = SentenceTransformer("all-MiniLM-L6-v2")
 
-    for i, para in enumerate(doc.paragraphs):
-        if pattern.search(para.text):
-            found_index = i
-            break
+# === Prompts ===
+INCLUSION_PROMPT = """
+Check if the abstract discusses one or more of the following:
+1. Suspected adverse reactions in humans, including those from published abstracts, solicited reports, or manuscripts.
+2. Specific situations like pregnancy, paediatrics, elderly, off-label use, overdose, medication error, or misuse.
+3. Adverse reactions due to product quality, falsified medicine, or transmission of infection.
+4. Lack of therapeutic efficacy.
+5. Review of non-company-sponsored clinical trial outcomes.
+6. Aggregated adverse reaction data that could become a valid ICSR.
+If any of these are present, classify it as INCLUSION.
+"""
 
-    if found_index is None:
-        print(f"❌ Text not found: {search_text}")
-        return None
+EXCLUSION_PROMPT = """
+Classify the abstract as EXCLUSION if:
+1. No adverse event (AE) with company suspect product is discussed.
+2. It refers only to animal/preclinical/in-vitro/ex-vivo studies.
+3. There’s no or negative causality with company suspect product.
+4. Suspect product is from a non-company (different MAH).
+5. No identifiable ICSR or medical relevance.
+"""
 
-    para_counter = 0
-    table_counter = 0
-    for block in doc.element.body:
-        if block.tag.endswith('p'):
-            para_counter += 1
-        elif block.tag.endswith('tbl'):
-            if para_counter > found_index:
-                table = doc.tables[table_counter]
-                break
-            table_counter += 1
-    else:
-        print(f"❌ No table found after: {search_text}")
-        return None
+PROMPT_TEMPLATE = f"{INCLUSION_PROMPT}\n{EXCLUSION_PROMPT}\n\nAbstract:\n{{abstract}}\n\nRespond with only INCLUSION or EXCLUSION."
 
-    table_data = []
-    for row in table.rows:
-        table_data.append([cell.text.strip() for cell in row.cells])
-
-    if len(table_data) > 1 and table_data[0] == table_data[1]:
-        table_data.pop(1)
-
-    return table_data
-
-def save_table_to_excel(table_data, excel_path):
-    os.makedirs(os.path.dirname(excel_path), exist_ok=True)
-    df = pd.DataFrame(table_data[1:], columns=table_data[0])
-    df.to_excel(excel_path, index=False)
-    print(f"✅ Table saved to: {excel_path}")
-
-def generate_fallback_doc(medicine):
-    fallback_doc = Document()
-    fallback_doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
-    placeholder_text = (
-        f"No cumulative and interval patient exposure from marketing experience was available as the MAH "
-        f"has not marketed its product {medicine} in any country since obtaining initial granting of MA "
-        f"till the DLP of this report."
-    )
-    fallback_doc.add_paragraph(placeholder_text)
-    fallback_doc.save("Esomeprazole_Exposure.docx")
-    print("📄 Placeholder Word document saved as 'Esomeprazole_Exposure.docx'")
-
-def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, medicine, place, date):
-    df = pd.read_excel(excel_path, engine='openpyxl')
-
-    df["Strength in mg"] = df["Strength in mg"].astype(str).str.replace("mg", "").str.strip()
-    df["Strength in mg"] = pd.to_numeric(df["Strength in mg"], errors='coerce')
-
-    pack_column = next((col for col in ["Pack", "Packs"] if col in df.columns), None)
-    if pack_column:
-        df[pack_column] = pd.to_numeric(df[pack_column].astype(str).str.replace(",", "").str.extract(r'(\d+)')[0], errors='coerce').fillna(0).astype(int)
-
-    if "Pack size" in df.columns:
-        pack_size_extracted = df["Pack size"].astype(str).str.extract(r'(\d+)\s*[xX]\s*(\d+)')
-        df["Pack size"] = pd.to_numeric(pack_size_extracted[0], errors='coerce').fillna(1).astype(int) * pd.to_numeric(pack_size_extracted[1], errors='coerce').fillna(1).astype(int)
-
-    unit_col = "Number of tablets / Capsules/Injections"
-    df[unit_col] = df[unit_col].astype(str).str.replace(",", "").str.split(":").str[-1].str.strip()
-    df[unit_col] = pd.to_numeric(df[unit_col], errors='coerce')
-
-    df["Delivered quantity (mg)"] = pd.to_numeric(df["Delivered quantity (mg)"].astype(str).str.replace(",", ""), errors='coerce')
-    df.rename(columns={"Product": "Molecule"}, inplace=True)
-
-    df["Sales Figure (mg) or period/Volume of sales (in mg)"] = df[unit_col] * df["Strength in mg"]
-    df["Patients Exposure (PTY) for period"] = df["Sales Figure (mg) or period/Volume of sales (in mg)"] / (ddd_value * 365)
-    df["Patients Exposure (PTY) for period"] = df["Patients Exposure (PTY) for period"].round(0)
-
-    df_country = df[df["Country"] == country_name].copy()
-    df_non_country = df[df["Country"] != country_name].copy()
-
-    def create_clean_total_row(dataframe):
-        total = dataframe["Patients Exposure (PTY) for period"].sum()
-        total_row = {col: "" for col in dataframe.columns}
-        total_row["Country"] = "Total"
-        total_row["Patients Exposure (PTY) for period"] = int(total)
-        return pd.DataFrame([total_row])
-
-    # Add total rows
-    df_country_total_row = create_clean_total_row(df_country)
-    df_non_country_total_row = create_clean_total_row(df_non_country)
-
-    # Append total to dataframes
-    df_country = pd.concat([df_country, df_country_total_row], ignore_index=True)
-    df_non_country = pd.concat([df_non_country, df_non_country_total_row], ignore_index=True)
-
-    df_country.fillna("", inplace=True)
-    df_non_country.fillna("", inplace=True)
-
-    # ✅ Print both totals
-    sa_total = df_country_total_row["Patients Exposure (PTY) for period"].values[0]
-    non_sa_total = df_non_country_total_row["Patients Exposure (PTY) for period"].values[0]
-    combined_total = int(sa_total) + int(non_sa_total)
-
-    print(f"📍 Total Exposure for {country_name}: {int(sa_total)}")
-    print(f"📍 Total Exposure for Non-{country_name}: {int(non_sa_total)}")
-    print(f"📊 Combined Total Exposure: {combined_total}")
-
-    # Check for fallback
-    if sa_total == 0:
-        generate_fallback_doc(medicine)
-        return
-
-    # Proceed to generate Word doc
-    doc = Document()
-    doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
-
-    summary_text = (
-        f"The MAH obtained initial MA for their generic formulation of {medicine} in {place} on {date}.\n"
-        f"The post-authorization exposure to {medicine} during the cumulative period was {combined_total} patients "
-        f"({place}: {int(sa_total)} and Non {place}: {int(non_sa_total)}) treatment days approximately and presented in Table 3."
-    )
-    doc.add_paragraph(summary_text)
-
-    def add_table_with_data(doc, dataframe, title):
-        doc.add_heading(title, level=2)
-        table = doc.add_table(rows=1, cols=len(dataframe.columns))
-        table.style = 'Table Grid'
-        hdr_cells = table.rows[0].cells
-        for i, col_name in enumerate(dataframe.columns):
-            hdr_cells[i].text = str(col_name)
-        for _, row in dataframe.iterrows():
-            row_cells = table.add_row().cells
-            for i, item in enumerate(row):
-                row_cells[i].text = str(item)
-
-    add_table_with_data(doc, df_country, f"                                                      {country_name} ")
-    add_table_with_data(doc, df_non_country, f"                                                      Non-{country_name} ")
-
-    doc.save("Esomeprazole_Exposure.docx")
-    print("✅ Word document saved as 'Esomeprazole_Exposure.docx'")
-
-# === MAIN EXECUTION ===
-
-if __name__ == "__main__":
-    docx_path = r"C:\Users\shivam.mishra2\Downloads\ALL_PSUR_File\PSUR_all _Data\Olanzapine PSUR_South Africa_29-Sep-17 to 31-Mar-25\Draft\DRA\Data request form_olanzapine.docx"
-    search_text = "Cumulative sales data sale required"
-    excel_output_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\marketing_exposure_tables.xlsx"
-
-    ddd_value = 10
-    country = "South Africa"
-    medicine = "Esomeprazole"
-    place = "South Africa"
-    date = "2020-01-01"
-
+# === Ollama Query Function ===
+def query_ollama(abstract_text, model_name="llama3"):
+    prompt = PROMPT_TEMPLATE.format(abstract=abstract_text)
     try:
-        if not os.path.exists(docx_path):
-            raise FileNotFoundError(f"File not found: {docx_path}")
-        doc = Document(docx_path)
-        table_data = extract_table_after_text(doc, search_text)
-        if table_data:
-            save_table_to_excel(table_data, excel_output_path)
-            calculate_exposure_and_generate_doc(excel_output_path, ddd_value, country, medicine, place, date)
-        else:
-            print("⚠️ Table not found after search text. Generating fallback document.")
-            generate_fallback_doc(medicine)
+        result = subprocess.run(
+            ["ollama", "run", model_name],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore"
+        )
+        return result.stdout.strip().upper()
     except Exception as e:
-        print(f"⚠️ Error: {e}")
-        generate_fallback_doc(medicine)
+        print("❌ Ollama error:", e)
+        return "ERROR"
+
+# === FAISS Semantic Filter (Optional) ===
+def semantic_filter(query, top_k=300):
+    query_vec = model.encode([query])[0].astype("float32")
+    _, I = index.search(np.array([query_vec]), top_k)
+    return df.iloc[I[0]]
+
+# === Run Classification ===
+filtered_df = semantic_filter("adverse drug reaction")
+
+inclusions, exclusions = [], []
+for _, row in filtered_df.iterrows():
+    decision = query_ollama(row["Abstract"])
+    if "INCLUSION" in decision:
+        inclusions.append(row)
+    elif "EXCLUSION" in decision:
+        exclusions.append(row)
+    else:
+        print("⚠️ Ambiguous or error response:", decision)
+
+# === Save Results ===
+pd.DataFrame(inclusions).to_csv("relevant_df.csv", index=False)
+pd.DataFrame(exclusions).to_csv("irrelevant_df.csv", index=False)
+print("✅ Classification completed. Files saved.")
