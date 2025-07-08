@@ -5,7 +5,7 @@ import faiss
 import subprocess
 from sentence_transformers import SentenceTransformer
 
-# === Load FAISS and Metadata ===
+# === Load FAISS index, metadata, and embedding model ===
 @st.cache_resource
 def load_resources():
     df = pd.read_pickle("metadata.pkl")
@@ -15,7 +15,7 @@ def load_resources():
 
 df, index, model = load_resources()
 
-# === Prompts ===
+# === Prompts for LLM ===
 INCLUSION_PROMPT = """
 Check if the abstract discusses one or more of the following:
 1. Suspected adverse reactions in humans, including those from published abstracts, solicited reports, or manuscripts.
@@ -38,7 +38,7 @@ Classify the abstract as EXCLUSION if:
 
 PROMPT_TEMPLATE = f"{INCLUSION_PROMPT}\n{EXCLUSION_PROMPT}\n\nAbstract:\n{{abstract}}\n\nRespond with only INCLUSION or EXCLUSION."
 
-# === Query Ollama LLM Locally ===
+# === Local Ollama query function ===
 def query_ollama(abstract_text, model_name="llama3"):
     prompt = PROMPT_TEMPLATE.format(abstract=abstract_text)
     try:
@@ -54,34 +54,62 @@ def query_ollama(abstract_text, model_name="llama3"):
     except Exception as e:
         return f"ERROR: {e}"
 
-# === Semantic Filter using FAISS ===
+# === Semantic FAISS filter ===
 def semantic_filter(query, top_k):
     query_vec = model.encode([query])[0].astype("float32")
     _, I = index.search(np.array([query_vec]), top_k)
     return df.iloc[I[0]]
 
-# === Streamlit App Interface ===
-st.title("📑 ICSR Abstract Classifier (Local Ollama + FAISS)")
+# === Streamlit UI ===
+st.title("📑 ICSR Abstract Classifier (FAISS + Ollama Local LLM)")
 
-top_k = st.number_input("How many abstracts (Top K) to classify?", min_value=1, max_value=1000, value=100)
-run_button = st.button("🔍 Run Classification")
+user_query = st.text_input("🔍 Enter your medical search query:", value="adverse reaction")
+top_k = st.number_input("📊 How many top similar abstracts to check?", min_value=1, max_value=1000, value=50)
+run_button = st.button("🚀 Classify Abstracts")
 
-if run_button:
+if run_button and user_query:
     st.info("Running semantic search and classification...")
-    filtered_df = semantic_filter("adverse drug reaction", top_k=top_k)
 
-    inclusion_results = []
+    filtered_df = semantic_filter(user_query, top_k=top_k)
+
+    inclusions, exclusions, errors = [], [], []
 
     for _, row in filtered_df.iterrows():
-        decision = query_ollama(row["Abstract"])
-        if "INCLUSION" in decision:
-            inclusion_results.append(f"🔹 **PMID**: {row['PMID']}\n\n{row['Abstract']}\n")
-        elif "EXCLUSION" not in decision:
-            st.warning(f"⚠️ Ambiguous or error response: {decision[:100]}...")
+        abstract = row.get("Abstract", "")
+        pmid = row.get("PMID", "N/A")
 
-    if inclusion_results:
-        st.subheader("✅ Included Abstracts:")
-        for item in inclusion_results:
-            st.markdown(item)
-    else:
-        st.error("❌ No relevant abstracts classified as INCLUSION.")
+        decision = query_ollama(abstract)
+        if "INCLUSION" in decision:
+            inclusions.append(f"🔹 **PMID**: {pmid}\n\n{abstract}")
+        elif "EXCLUSION" in decision:
+            exclusions.append(f"🔸 **PMID**: {pmid}\n\n{abstract}")
+        else:
+            errors.append(f"⚠️ PMID: {pmid} - Unexpected response: {decision}")
+
+    # === Display Results ===
+    st.success("✅ Classification completed.")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("✅ INCLUSION Abstracts")
+        if inclusions:
+            for item in inclusions:
+                st.markdown(item)
+                st.markdown("---")
+        else:
+            st.info("No relevant abstracts classified as INCLUSION.")
+
+    with col2:
+        st.subheader("❌ EXCLUSION Abstracts")
+        if exclusions:
+            for item in exclusions:
+                st.markdown(item)
+                st.markdown("---")
+        else:
+            st.info("No abstracts classified as EXCLUSION.")
+
+    if errors:
+        st.warning("⚠️ Some responses were unclear or failed to classify.")
+        for err in errors:
+            st.text(err)
