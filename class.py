@@ -1,181 +1,69 @@
-import os
-import re
+ #Step 2: Load the Data
+
 import pandas as pd
+
+# Load your dataset
+df = pd.read_csv("your_file.csv")  # Or Excel or other formats
+df = df[["PMID", "Title", "Abstract"]]  # Keep only necessary columns
+df.dropna(subset=["Abstract"], inplace=True)  # Remove rows with empty abstracts
+df.reset_index(drop=True, inplace=True)
+
+# Step 3: Generate Embeddings Locally using Sentence Transformers
+
+from sentence_transformers import SentenceTransformer
+
+# Load local embedding model (you can replace with a better one like 'all-MiniLM-L6-v2' if offline)
+model = SentenceTransformer('all-MiniLM-L6-v2')  # Downloads model first time only
+
+# Create embeddings for all abstracts
+abstracts = df["Abstract"].tolist()
+embeddings = model.encode(abstracts, show_progress_bar=True)
+
+# Step 4: Store Embeddings in FAISS
+
+import faiss
 import numpy as np
-from docx import Document
 
-class ExposureReportGenerator:
-    def __init__(self, docx_path, search_text, ddd_value, country, medicine, place, date):
-        self.docx_path = docx_path
-        self.search_text = search_text
-        self.ddd_value = ddd_value
-        self.country = country
-        self.medicine = medicine
-        self.place = place
-        self.date = date
-        self.doc = Document(docx_path)
+# Convert embeddings to float32 (FAISS requirement)
+embedding_dim = embeddings[0].shape[0]
+embedding_matrix = np.array(embeddings).astype("float32")
 
-    def extract_table_after_text(self):
-        pattern = re.compile(re.escape(self.search_text), re.IGNORECASE)
-        found_index = None
+# Build FAISS index
+index = faiss.IndexFlatL2(embedding_dim)
+index.add(embedding_matrix)
 
-        for i, para in enumerate(self.doc.paragraphs):
-            if pattern.search(para.text):
-                found_index = i
-                break
+# Step 5: Define Search Function
 
-        if found_index is None:
-            print(f"❌ Text not found: {self.search_text}")
-            return None
+def search_abstracts(query, top_k=5):
+    query_embedding = model.encode([query])[0].astype("float32")
+    D, I = index.search(np.array([query_embedding]), top_k)
+    
+    # Return top_k results
+    results = df.iloc[I[0]]
+    return results
 
-        para_counter = 0
-        table_counter = 0
-        for block in self.doc.element.body:
-            if block.tag.endswith('p'):
-                para_counter += 1
-            elif block.tag.endswith('tbl'):
-                if para_counter > found_index:
-                    table = self.doc.tables[table_counter]
-                    break
-                table_counter += 1
-        else:
-            print(f"❌ No table found after: {self.search_text}")
-            return None
+#  Step 6: Run a Query and See Top Matches
 
-        table_data = []
-        for row in table.rows:
-            table_data.append([cell.text.strip() for cell in row.cells])
-
-        if len(table_data) > 1 and table_data[0] == table_data[1]:
-            table_data.pop(1)
-
-        return table_data
-
-    def save_table_to_excel(self, table_data, excel_path):
-        os.makedirs(os.path.dirname(excel_path), exist_ok=True)
-        df = pd.DataFrame(table_data[1:], columns=table_data[0])
-        df.to_excel(excel_path, index=False)
-        print(f"✅ Table saved to: {excel_path}")
-
-    def generate_fallback_doc(self):
-        fallback_doc = Document()
-        fallback_doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
-        placeholder_text = (
-            f"No cumulative and interval patient exposure from marketing experience was available as the MAH "
-            f"has not marketed its product {self.medicine} in any country since obtaining initial granting of MA "
-            f"till the DLP of this report."
-        )
-        fallback_doc.add_paragraph(placeholder_text)
-        fallback_doc.save("Esomeprazole_Exposure.docx")
-        print("📄 Placeholder Word document saved as 'Esomeprazole_Exposure.docx'")
-
-    def calculate_exposure_and_generate_doc(self, excel_path):
-        df = pd.read_excel(excel_path, engine='openpyxl')
-
-        df["Strength in mg"] = df["Strength in mg"].astype(str).str.replace("mg", "").str.strip()
-        df["Strength in mg"] = pd.to_numeric(df["Strength in mg"], errors='coerce')
-
-        pack_column = next((col for col in ["Pack", "Packs"] if col in df.columns), None)
-        if pack_column:
-            df[pack_column] = pd.to_numeric(df[pack_column].astype(str).str.replace(",", "").str.extract(r'(\d+)')[0], errors='coerce').fillna(0).astype(int)
-
-        if "Pack size" in df.columns:
-            pack_size_extracted = df["Pack size"].astype(str).str.extract(r'(\d+)\s*[xX]\s*(\d+)')
-            df["Pack size"] = pd.to_numeric(pack_size_extracted[0], errors='coerce').fillna(1).astype(int) * pd.to_numeric(pack_size_extracted[1], errors='coerce').fillna(1).astype(int)
-
-        unit_col = "Number of tablets / Capsules/Injections"
-        df[unit_col] = df[unit_col].astype(str).str.replace(",", "").str.split(":").str[-1].str.strip()
-        df[unit_col] = pd.to_numeric(df[unit_col], errors='coerce')
-
-        df["Delivered quantity (mg)"] = pd.to_numeric(df["Delivered quantity (mg)"].astype(str).str.replace(",", ""), errors='coerce')
-        df.rename(columns={"Product": "Molecule"}, inplace=True)
-
-        df["Sales Figure (mg) or period/Volume of sales (in mg)"] = df[unit_col] * df["Strength in mg"]
-        df["Patients Exposure (PTY) for period"] = df["Sales Figure (mg) or period/Volume of sales (in mg)"] / (self.ddd_value * 365)
-        df["Patients Exposure (PTY) for period"] = df["Patients Exposure (PTY) for period"].round(0)
-
-        df_country = df[df["Country"] == self.country].copy()
-        df_non_country = df[df["Country"] != self.country].copy()
-
-        def create_clean_total_row(dataframe):
-            total = dataframe["Patients Exposure (PTY) for period"].sum()
-            total_row = {col: "" for col in dataframe.columns}
-            total_row["Country"] = "Total"
-            total_row["Patients Exposure (PTY) for period"] = int(total)
-            return pd.DataFrame([total_row])
-
-        df_country = pd.concat([df_country, create_clean_total_row(df_country)], ignore_index=True)
-        df_non_country = pd.concat([df_non_country, create_clean_total_row(df_non_country)], ignore_index=True)
-
-        df_country.fillna("", inplace=True)
-        df_non_country.fillna("", inplace=True)
-
-        sa_total = df_country[df_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
-        if sa_total == 0:
-            self.generate_fallback_doc()
-            return
-
-        doc = Document()
-        doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
-
-        non_country_total = df_non_country[df_non_country["Country"] == "Total"]["Patients Exposure (PTY) for period"].values[0]
-        total_exposure = sa_total + non_country_total
-
-        summary_text = (
-            f"The MAH obtained initial MA for their generic formulation of {self.medicine} in {self.place} on {self.date}.\n"
-            f"The post-authorization exposure to {self.medicine} during the cumulative period was {int(total_exposure)} patients "
-            f"({self.place}: {int(sa_total)} and Non {self.place}: {int(non_country_total)}) treatment days approximately and presented in Table 3."
-        )
-        doc.add_paragraph(summary_text)
-
-        self.add_table_with_data(doc, df_country, f"                                                      {self.country} ")
-        self.add_table_with_data(doc, df_non_country, f"                                                      Non-{self.country} ")
-
-        doc.save("Esomeprazole_Exposure.docx")
-        print("✅ Word document saved as 'Esomeprazole_Exposure.docx'")
-
-    def add_table_with_data(self, doc, dataframe, title):
-        doc.add_heading(title, level=2)
-        table = doc.add_table(rows=1, cols=len(dataframe.columns))
-        table.style = 'Table Grid'
-        hdr_cells = table.rows[0].cells
-        for i, col_name in enumerate(dataframe.columns):
-            hdr_cells[i].text = str(col_name)
-        for _, row in dataframe.iterrows():
-            row_cells = table.add_row().cells
-            for i, item in enumerate(row):
-                row_cells[i].text = str(item)
-
-    def run(self, excel_output_path):
-        try:
-            if not os.path.exists(self.docx_path):
-                raise FileNotFoundError(f"File not found: {self.docx_path}")
-            table_data = self.extract_table_after_text()
-            if table_data:
-                self.save_table_to_excel(table_data, excel_output_path)
-                self.calculate_exposure_and_generate_doc(excel_output_path)
-            else:
-                print("⚠️ Table not found after search text. Generating fallback document.")
-                self.generate_fallback_doc()
-        except Exception as e:
-            print(f"⚠️ Error: {e}")
-            self.generate_fallback_doc()
+query = "pancreatic cancer treatment"
+top_results = search_abstracts(query, top_k=5)
+print(top_results[["PMID", "Title", "Abstract"]])
 
 
-# === EXAMPLE USAGE ===
-if __name__ == "__main__":
-    docx_path = r"C:\Users\shivam.mishra2\Downloads\ALL_PSUR_File\PSUR_all _Data\Olanzapine PSUR_South Africa_29-Sep-17 to 31-Mar-25\Draft\DRA\Data request form_olanzapine.docx"
-    search_text = "Cumulative sales data sale required"
-    excel_output_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\marketing_exposure_tables.xlsx"
+# Optional) Step 7: Use Ollama Locally to Summarize or Interact
+# If you have Ollama running a model like llama3:
 
-    generator = ExposureReportGenerator(
-        docx_path=docx_path,
-        search_text=search_text,
-        ddd_value=10,
-        country="South Africa",
-        medicine="Esomeprazole",
-        place="South Africa",
-        date="2020-01-01"
+import subprocess
+
+def ask_ollama(prompt, model="llama3"):
+    result = subprocess.run(
+        ["ollama", "run", model],
+        input=prompt,
+        capture_output=True,
+        text=True
     )
+    return result.stdout
 
-    generator.run(excel_output_path)
+# Example: Summarize the abstract
+abstract_text = top_results.iloc[0]["Abstract"]
+summary = ask_ollama(f"Summarize the following abstract:\n\n{abstract_text}")
+print(summary)
