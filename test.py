@@ -1,14 +1,19 @@
-# classify_with_ollama.py
+import streamlit as st
 import pandas as pd
 import numpy as np
 import faiss
-from sentence_transformers import SentenceTransformer
 import subprocess
+from sentence_transformers import SentenceTransformer
 
-# === Load Data ===
-df = pd.read_pickle("metadata.pkl")
-index = faiss.read_index("faiss_index.bin")
-model = SentenceTransformer("all-MiniLM-L6-v2")
+# === Load FAISS and Metadata ===
+@st.cache_resource
+def load_resources():
+    df = pd.read_pickle("metadata.pkl")
+    index = faiss.read_index("faiss_index.bin")
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    return df, index, model
+
+df, index, model = load_resources()
 
 # === Prompts ===
 INCLUSION_PROMPT = """
@@ -33,7 +38,7 @@ Classify the abstract as EXCLUSION if:
 
 PROMPT_TEMPLATE = f"{INCLUSION_PROMPT}\n{EXCLUSION_PROMPT}\n\nAbstract:\n{{abstract}}\n\nRespond with only INCLUSION or EXCLUSION."
 
-# === Ollama Query Function ===
+# === Query Ollama LLM Locally ===
 def query_ollama(abstract_text, model_name="llama3"):
     prompt = PROMPT_TEMPLATE.format(abstract=abstract_text)
     try:
@@ -47,29 +52,36 @@ def query_ollama(abstract_text, model_name="llama3"):
         )
         return result.stdout.strip().upper()
     except Exception as e:
-        print("❌ Ollama error:", e)
-        return "ERROR"
+        return f"ERROR: {e}"
 
-# === FAISS Semantic Filter (Optional) ===
-def semantic_filter(query, top_k=300):
+# === Semantic Filter using FAISS ===
+def semantic_filter(query, top_k):
     query_vec = model.encode([query])[0].astype("float32")
     _, I = index.search(np.array([query_vec]), top_k)
     return df.iloc[I[0]]
 
-# === Run Classification ===
-filtered_df = semantic_filter("adverse drug reaction")
+# === Streamlit App Interface ===
+st.title("📑 ICSR Abstract Classifier (Local Ollama + FAISS)")
 
-inclusions, exclusions = [], []
-for _, row in filtered_df.iterrows():
-    decision = query_ollama(row["Abstract"])
-    if "INCLUSION" in decision:
-        inclusions.append(row)
-    elif "EXCLUSION" in decision:
-        exclusions.append(row)
+top_k = st.number_input("How many abstracts (Top K) to classify?", min_value=1, max_value=1000, value=100)
+run_button = st.button("🔍 Run Classification")
+
+if run_button:
+    st.info("Running semantic search and classification...")
+    filtered_df = semantic_filter("adverse drug reaction", top_k=top_k)
+
+    inclusion_results = []
+
+    for _, row in filtered_df.iterrows():
+        decision = query_ollama(row["Abstract"])
+        if "INCLUSION" in decision:
+            inclusion_results.append(f"🔹 **PMID**: {row['PMID']}\n\n{row['Abstract']}\n")
+        elif "EXCLUSION" not in decision:
+            st.warning(f"⚠️ Ambiguous or error response: {decision[:100]}...")
+
+    if inclusion_results:
+        st.subheader("✅ Included Abstracts:")
+        for item in inclusion_results:
+            st.markdown(item)
     else:
-        print("⚠️ Ambiguous or error response:", decision)
-
-# === Save Results ===
-pd.DataFrame(inclusions).to_csv("relevant_df.csv", index=False)
-pd.DataFrame(exclusions).to_csv("irrelevant_df.csv", index=False)
-print("✅ Classification completed. Files saved.")
+        st.error("❌ No relevant abstracts classified as INCLUSION.")
