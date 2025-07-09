@@ -2,27 +2,25 @@ import pandas as pd
 import json
 import subprocess
 import numpy as np
-from sentence_transformers import SentenceTransformer, util
 import torch
+from sentence_transformers import SentenceTransformer, util
 
 # === Step 1: Load Data ===
 csv_path = r"C:\Users\shivam.mishra2\Downloads\literature_data.csv"
 df = pd.read_csv(csv_path)
 
-# === Step 2: Print Missing Abstracts ===
+# === Step 2: Print Missing Abstracts Only ===
 missing_abstracts = df[df['Abstract'].isnull() | df['Abstract'].str.strip().eq("")]
-print("\n=== Missing Abstracts ===")
+print("\n=== Missing Abstracts (PMID, Title) ===")
 print(missing_abstracts[['PMID', 'Title']])
 
-# Filter valid abstracts
+# Drop rows with missing abstracts
 df = df.dropna(subset=["Abstract"])
 df = df[df["Abstract"].str.strip() != ""]
 
-# === Step 3: Embedding Setup ===
-model = SentenceTransformer("all-MiniLM-L6-v2")
-
-# Encode all abstracts
+# === Step 3: Load Embedding Model ===
 print("🔄 Encoding abstracts...")
+model = SentenceTransformer("all-MiniLM-L6-v2")
 abstract_texts = df["Abstract"].tolist()
 abstract_embeddings = model.encode(abstract_texts, convert_to_tensor=True)
 
@@ -31,6 +29,7 @@ inclusive_query = """
 Suspected adverse reactions in humans; pregnancy, pediatrics, overdose, misuse,
 lack of efficacy, quality defects, falsified medicines, infectious transmission, ICSR, etc.
 """
+
 inclusive_keywords = [
     "adverse reaction", "ICSR", "overdose", "lack of efficacy", "pregnancy", "elderly",
     "misuse", "medication error", "paediatrics", "falsified", "infectious"
@@ -39,9 +38,9 @@ inclusive_keywords = [
 query_embedding = model.encode(inclusive_query, convert_to_tensor=True)
 keyword_embeddings = model.encode(inclusive_keywords, convert_to_tensor=True)
 
-similarity_threshold = 0.5
+similarity_threshold = 0.5  # You can adjust this
 
-# === Step 5: Ollama Utilities ===
+# === Step 5: Ollama Functions ===
 def classify_with_ollama(abstract):
     prompt = f"""
 Classify the abstract as INCLUSION or EXCLUSION based on these criteria:
@@ -96,15 +95,18 @@ Abstract:
         print("❌ Summary error:", e.stderr)
         return ""
 
-# === Step 6: Semantic Search + Ollama Loop ===
+# === Step 6: Process Abstracts Based on Similarity and Classify ===
 inclusive_abstracts = []
 exclusive_abstracts = []
 inclusive_summaries = []
 exclusive_summaries = []
 
-print("🔍 Starting semantic filtering + classification...")
-for idx, (pmid, title, abstract) in df[["PMID", "Title", "Abstract"]].iterrows():
-    emb = abstract_embeddings[idx]
+print("\n🔍 Running Semantic Search and Classification...")
+for i, row in enumerate(df.itertuples(index=False)):
+    pmid = row.PMID
+    title = row.Title
+    abstract = row.Abstract
+    emb = abstract_embeddings[i]
 
     sim_query = util.cos_sim(emb, query_embedding).item()
     sim_keywords = util.cos_sim(emb, keyword_embeddings).squeeze()
@@ -127,13 +129,14 @@ for idx, (pmid, title, abstract) in df[["PMID", "Title", "Abstract"]].iterrows()
     else:
         print(f"⏭️ Skipped PMID {pmid} (similarity too low: {max(sim_query, max_sim_keyword):.2f})")
 
-# === Step 7: Save Outputs ===
+# === Step 7: Save JSON Results ===
 with open("inclusive_abstracts.json", "w", encoding="utf-8") as f:
     json.dump(inclusive_abstracts, f, indent=2, ensure_ascii=False)
 
 with open("exclusive_abstracts.json", "w", encoding="utf-8") as f:
     json.dump(exclusive_abstracts, f, indent=2, ensure_ascii=False)
 
+# === Step 8: Save Summary Files ===
 with open("inclusive_summary_with_pmid.txt", "w", encoding="utf-8") as f:
     for pmid, title, summary in inclusive_summaries:
         f.write(f"PMID: {pmid}\nTitle: {title}\nSummary: {summary}\n\n{'='*100}\n\n")
@@ -142,4 +145,4 @@ with open("exclusive_summary_with_pmid.txt", "w", encoding="utf-8") as f:
     for pmid, title, summary in exclusive_summaries:
         f.write(f"PMID: {pmid}\nTitle: {title}\nSummary: {summary}\n\n{'='*100}\n\n")
 
-print("\n✅ DONE: Embedding → Filtering → Classification → Summarization completed.")
+print("\n✅ DONE: Embedding → Similarity Search → Classification → Summary Saved.")
