@@ -1,10 +1,28 @@
-INCLUSION_PROMPT = """
-Check if the abstract discusses one or more of the following:
-1. Suspected adverse reactions in humans, including those from published abstracts, solicited reports, or manuscripts.
-2. Specific situations like pregnancy, paediatrics, elderly, off-label use, overdose, medication error, or misuse.
-3. Adverse reactions due to product quality, falsified medicine, or transmission of infection.
-4. Lack of therapeutic efficacy.
-5. Review of non-company-sponsored clinical trial outcomes.
-6. Aggregated adverse reaction data that could become a valid ICSR.
-If any of these are present, classify it as INCLUSION.
+CHARACTERISATION_OF_BENEFITS_PROMPT = """
+You are a pharmacovigilance expert generating the PSUR sub-section titled “Characterisation of Benefits” based on input benefit data.
+
+Your task is to analyse and summarise the evidence for benefits of the product during the reporting interval. Integrate the baseline benefit information with any new benefit data provided in the input.
+
+When generating the output, follow these instructions:
+
+1. If there is **no new benefit information**, characterise the baseline benefit data only.
+2. If **new benefit data is present**, critically integrate and evaluate it with the baseline data.
+3. Consider the following elements when available:
+   - Strength of evidence: comparator(s), effect size, statistical significance, consistency, methodology.
+   - Validity of endpoints used (especially surrogate endpoints).
+   - Clinical relevance of effect size.
+   - Generalisability to full indicated population (e.g., any sub-population not showing benefit).
+   - Dose-response characterisation.
+   - Duration of effect.
+   - Comparative efficacy.
+   - Whether trial data is applicable to real-world practice.
+
+Be concise but include key findings. Use bullet points where clarity is needed. Use professional pharmacovigilance language suitable for regulatory reporting.
+
+INPUT BENEFIT DATA:
+\"\"\"
+{benefit_text}
+\"\"\"
+
+Generate the "Characterisation of Benefits" section text below:
 """
