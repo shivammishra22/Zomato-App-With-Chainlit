@@ -1,0 +1,110 @@
+import pandas as pd
+import numpy as np
+import faiss
+import re
+from concurrent.futures import ThreadPoolExecutor
+from langchain_ollama import OllamaEmbeddings
+import ollama
+
+# === STEP 1: Load CSV and extract required columns ===
+df = pd.read_csv("your_file.csv")  # Replace with actual CSV path
+df = df[["PMID", "Title", "Abstract"]].dropna(subset=["Abstract"])
+
+# === STEP 2: Convert Abstracts to Embeddings and Index ===
+embedding_model = OllamaEmbeddings(model="mxbai-embed-large:latest")
+abstract_list = df["Abstract"].tolist()
+abstract_embeddings = embedding_model.embed_documents(abstract_list)
+abstract_embeddings = np.array(abstract_embeddings)
+
+index = faiss.IndexFlatL2(abstract_embeddings.shape[1])
+index.add(abstract_embeddings)
+
+# === STEP 3: Define query, keywords, and filter threshold ===
+query = "case of adverse reaction in paediatric or elderly population"
+keywords = ["adverse reaction", "overdose", "medication error", "pregnancy", "efficacy", "clinical trial"]
+threshold = 0.6
+
+query_vector = np.array([embedding_model.embed_query(query)])
+distances, indices = index.search(query_vector, k=100)  # Search top 100, we’ll filter for 10 matches
+
+# === STEP 4: Apply semantic + keyword filter ===
+filtered_rows = []
+for dist, idx in zip(distances[0], indices[0]):
+    if idx >= len(df): continue
+    abstract = df.iloc[idx]["Abstract"]
+    if dist <= threshold and any(re.search(kw, abstract, re.IGNORECASE) for kw in keywords):
+        filtered_rows.append(df.iloc[idx])
+    if len(filtered_rows) >= 10:
+        break
+
+if not filtered_rows:
+    print("❌ No relevant abstracts found.")
+    exit()
+
+filtered_df = pd.DataFrame(filtered_rows).drop_duplicates()
+
+# === STEP 5: Prompts ===
+INCLUSION_PROMPT = """
+Check if the abstract discusses one or more of the following:
+- Suspected adverse reactions in humans, including those from published abstracts, solicited reports, or manuscripts.
+- Specific situations like pregnancy, paediatrics, elderly, off-label use, overdose, medication error, or misuse.
+- Adverse reactions due to product quality, falsified medicine, or transmission of infection.
+- Lack of therapeutic efficacy.
+- Review of non-company-sponsored clinical trial outcomes.
+- Aggregated adverse reaction data that could become a valid ICSR.
+If any of these are present, classify it as INCLUSION.
+"""
+
+EXCLUSION_PROMPT = """
+Classify the abstract as EXCLUSION if:
+- No adverse event (AE) with company suspect product is discussed.
+- It refers only to animal/preclinical/in-vitro/ex-vivo studies.
+- There’s no or negative causality with company suspect product.
+- Suspect product is from a non-company (different MAH).
+ No identifiable ICSR or medical relevance. 
+"""
+
+# === STEP 6: Classify and Summarize ===
+def classify_and_summarize(row):
+    pmid, title, abstract = row["PMID"], row["Title"], row["Abstract"]
+    try:
+        # Always run both prompts
+        response_inc = ollama.generate(model="llama3", prompt=INCLUSION_PROMPT + f"\n\nAbstract:\n{abstract}")
+        inclusion_result = response_inc["response"].strip()
+
+        response_exc = ollama.generate(model="llama3", prompt=EXCLUSION_PROMPT + f"\n\nAbstract:\n{abstract}")
+        exclusion_result = response_exc["response"].strip()
+
+        # Summary prompt
+        summary_prompt = f'''Generate a short and precise summary of this abstract: "{abstract}". Start with "The abstract reports..."'''
+        response_sum = ollama.generate(model="llama3", prompt=summary_prompt)
+        summary = response_sum["response"].strip()
+
+        return {
+            "PMID": pmid,
+            "Title": title,
+            "INCLUSION": inclusion_result,
+            "EXCLUSION": exclusion_result,
+            "Summary": summary
+        }
+    except Exception as e:
+        return {
+            "PMID": pmid,
+            "Title": title,
+            "INCLUSION": "ERROR",
+            "EXCLUSION": "ERROR",
+            "Summary": f"Error: {str(e)}"
+        }
+
+# === STEP 7: Run in Parallel ===
+with ThreadPoolExecutor(max_workers=4) as executor:
+    results = list(executor.map(classify_and_summarize, [row for _, row in filtered_df.iterrows()]))
+
+# === STEP 8: Print Results ===
+for res in results:
+    print(f"\n📌 PMID: {res['PMID']}")
+    print(f"📘 Title: {res['Title']}")
+    print(f"✅ INCLUSION Check:\n{res['INCLUSION']}")
+    print(f"❌ EXCLUSION Check:\n{res['EXCLUSION']}")
+    print(f"📝 Summary:\n{res['Summary']}")
+    print("=" * 120)
