@@ -1,115 +1,73 @@
-import streamlit as st
 import pandas as pd
 import numpy as np
-import faiss
-import subprocess
-from sentence_transformers import SentenceTransformer
+from langchain_community.document_loaders.csv_loader import CSVLoader
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.llms import Ollama
+from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
 
-# === Load FAISS index, metadata, and embedding model ===
-@st.cache_resource
-def load_resources():
-    df = pd.read_pickle("metadata.pkl")
-    index = faiss.read_index("faiss_index.bin")
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    return df, index, model
+# === Step 1: Load CSV Data ===
+loader = CSVLoader(
+    file_path=r"C:\Users\assis\Downloads\Pubmed_cleaned_csv.csv",
+    encoding="utf-8",
+    source_column="Abstract",
+    metadata_columns=["PMID"],
+    csv_args={
+        "delimiter": ",",
+        "quotechar": '"',
+        "skipinitialspace": True
+    }
+)
 
-df, index, model = load_resources()
+documents = loader.load()
 
-# === Prompts for LLM ===
-INCLUSION_PROMPT = """
-Check if the abstract discusses one or more of the following:
-1. Suspected adverse reactions in humans, including those from published abstracts, solicited reports, or manuscripts.
-2. Specific situations like pregnancy, paediatrics, elderly, off-label use, overdose, medication error, or misuse.
-3. Adverse reactions due to product quality, falsified medicine, or transmission of infection.
-4. Lack of therapeutic efficacy.
-5. Review of non-company-sponsored clinical trial outcomes.
-6. Aggregated adverse reaction data that could become a valid ICSR.
-If any of these are present, classify it as INCLUSION.
+# === Step 2: Convert to Embeddings ===
+embedding_model = OllamaEmbeddings(model="mxbai-embed-large")  # or try "nomic-embed-text"
+
+# === Step 3: Create FAISS Vector Store ===
+vectorstore = FAISS.from_documents(documents, embedding_model)
+
+# === Step 4: Define Prompt ===
+template = """
+You are the pharmacovigilance expert generating the PSUR Sub-Section titled "Characterisation of Benefit Data".
+Integrate the baseline benefit information with any new benefit data provided in the input.
+
+Find the output from the given abstract based on the following instructions:
+1. Dose-response characterisation.
+2. Duration of effect.
+3. Comparative efficacy.
+4. Provide a concise but critical evaluation of the strengths and limitations of the evidence.
+5. Adequacy of dose-response characterisation.
+6. Strength of evidence of benefit, including comparator(s), effect size, statistical rigor, methodological strengths and deficiencies, and consistency across studies.
+7. Clinical relevance of the effect size.
+8. Generalisability of treatment response across the indicated patient population, including sub-populations.
+
+Be concise but include key findings. Use bullet points where clarity is needed. Use professional pharmacovigilance language suitable for regulatory reporting.
+
+Abstract:
+{context}
 """
 
-EXCLUSION_PROMPT = """
-Classify the abstract as EXCLUSION if:
-1. No adverse event (AE) with company suspect product is discussed.
-2. It refers only to animal/preclinical/in-vitro/ex-vivo studies.
-3. There’s no or negative causality with company suspect product.
-4. Suspect product is from a non-company (different MAH).
-5. No identifiable ICSR or medical relevance.
-"""
+prompt = PromptTemplate.from_template(template)
 
-PROMPT_TEMPLATE = f"{INCLUSION_PROMPT}\n{EXCLUSION_PROMPT}\n\nAbstract:\n{{abstract}}\n\nRespond with only INCLUSION or EXCLUSION."
+# === Step 5: Setup LLM Locally via Ollama ===
+llm = Ollama(model="llama3")  # you can use any supported local model
 
-# === Local Ollama query function ===
-def query_ollama(abstract_text, model_name="llama3"):
-    prompt = PROMPT_TEMPLATE.format(abstract=abstract_text)
-    try:
-        result = subprocess.run(
-            ["ollama", "run", model_name],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore"
-        )
-        return result.stdout.strip().upper()
-    except Exception as e:
-        return f"ERROR: {e}"
+# === Step 6: Create Retrieval QA Chain ===
+retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
 
-# === Semantic FAISS filter ===
-def semantic_filter(query, top_k):
-    query_vec = model.encode([query])[0].astype("float32")
-    _, I = index.search(np.array([query_vec]), top_k)
-    return df.iloc[I[0]]
+qa_chain = RetrievalQA.from_chain_type(
+    llm=llm,
+    retriever=retriever,
+    chain_type="stuff",
+    chain_type_kwargs={"prompt": prompt}
+)
 
-# === Streamlit UI ===
-st.title("📑 ICSR Abstract Classifier (FAISS + Ollama Local LLM)")
+# === Step 7: Ask a Question ===
+query = "Summarize the benefit data for regulatory submission using the given criteria."
+result = qa_chain.run(query)
 
-user_query = st.text_input("🔍 Enter your medical search query:", value="adverse reaction")
-top_k = st.number_input("📊 How many top similar abstracts to check?", min_value=1, max_value=1000, value=50)
-run_button = st.button("🚀 Classify Abstracts")
-
-if run_button and user_query:
-    st.info("Running semantic search and classification...")
-
-    filtered_df = semantic_filter(user_query, top_k=top_k)
-
-    inclusions, exclusions, errors = [], [], []
-
-    for _, row in filtered_df.iterrows():
-        abstract = row.get("Abstract", "")
-        pmid = row.get("PMID", "N/A")
-
-        decision = query_ollama(abstract)
-        if "INCLUSION" in decision:
-            inclusions.append(f"🔹 **PMID**: {pmid}\n\n{abstract}")
-        elif "EXCLUSION" in decision:
-            exclusions.append(f"🔸 **PMID**: {pmid}\n\n{abstract}")
-        else:
-            errors.append(f"⚠️ PMID: {pmid} - Unexpected response: {decision}")
-
-    # === Display Results ===
-    st.success("✅ Classification completed.")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("✅ INCLUSION Abstracts")
-        if inclusions:
-            for item in inclusions:
-                st.markdown(item)
-                st.markdown("---")
-        else:
-            st.info("No relevant abstracts classified as INCLUSION.")
-
-    with col2:
-        st.subheader("❌ EXCLUSION Abstracts")
-        if exclusions:
-            for item in exclusions:
-                st.markdown(item)
-                st.markdown("---")
-        else:
-            st.info("No abstracts classified as EXCLUSION.")
-
-    if errors:
-        st.warning("⚠️ Some responses were unclear or failed to classify.")
-        for err in errors:
-            st.text(err)
+# === Step 8: Print Final Output ===
+print("========== Final Summary ==========")
+print(result)
