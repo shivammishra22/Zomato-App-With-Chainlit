@@ -1,18 +1,20 @@
 import pandas as pd
 import numpy as np
 from langchain_community.document_loaders.csv_loader import CSVLoader
-from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_community.llms import Ollama
-from langchain.chains import RetrievalQA
+from langchain_community.vectorstores import FAISS
 from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+from langchain_core.documents import Document
+from tqdm import tqdm
 
-# === Step 1: Load CSV Data ===
+# === Step 1: Load CSV ===
 loader = CSVLoader(
     file_path=r"C:\Users\assis\Downloads\Pubmed_cleaned_csv.csv",
     encoding="utf-8",
     source_column="Abstract",
-    metadata_columns=["PMID"],
+    metadata_columns=["PMID", "Title"],
     csv_args={
         "delimiter": ",",
         "quotechar": '"',
@@ -20,54 +22,69 @@ loader = CSVLoader(
     }
 )
 
-documents = loader.load()
+docs = loader.load()
 
-# === Step 2: Convert to Embeddings ===
-embedding_model = OllamaEmbeddings(model="mxbai-embed-large")  # or try "nomic-embed-text"
+# === Step 2: Initialize Embedding Model ===
+embedding_model = OllamaEmbeddings(model="mxbai-embed-large")
 
-# === Step 3: Create FAISS Vector Store ===
-vectorstore = FAISS.from_documents(documents, embedding_model)
+# === Step 3: Build FAISS Vector Store ===
+db = FAISS.from_documents(docs, embedding_model)
 
-# === Step 4: Define Prompt ===
-template = """
-You are the pharmacovigilance expert generating the PSUR Sub-Section titled "Characterisation of Benefit Data".
-Integrate the baseline benefit information with any new benefit data provided in the input.
+# === Step 4: Define Evaluation Prompt ===
+evaluation_prompt = PromptTemplate.from_template("""
+You are a pharmacovigilance expert. Evaluate the abstract below and answer:
+"Does this abstract provide information relevant to the 'Characterisation of Benefit Data' section of a PSUR based on the criteria listed?"
 
-Find the output from the given abstract based on the following instructions:
-1. Dose-response characterisation.
-2. Duration of effect.
-3. Comparative efficacy.
-4. Provide a concise but critical evaluation of the strengths and limitations of the evidence.
-5. Adequacy of dose-response characterisation.
-6. Strength of evidence of benefit, including comparator(s), effect size, statistical rigor, methodological strengths and deficiencies, and consistency across studies.
-7. Clinical relevance of the effect size.
-8. Generalisability of treatment response across the indicated patient population, including sub-populations.
+Criteria:
+1. Dose-response characterisation
+2. Duration of effect
+3. Comparative efficacy
+4. Strengths and limitations of evidence
+5. Adequacy of dose-response characterisation
+6. Effect size, comparators, statistical rigor, consistency across studies
+7. Clinical relevance
+8. Generalisability across populations
 
-Be concise but include key findings. Use bullet points where clarity is needed. Use professional pharmacovigilance language suitable for regulatory reporting.
+Return only "Yes" or "No".
 
 Abstract:
-{context}
-"""
+{abstract}
+""")
 
-prompt = PromptTemplate.from_template(template)
+llm = Ollama(model="llama3")  # Local LLM
 
-# === Step 5: Setup LLM Locally via Ollama ===
-llm = Ollama(model="llama3")  # you can use any supported local model
+# === Step 5: Create LLM Evaluation Chain ===
+llm_chain = LLMChain(llm=llm, prompt=evaluation_prompt)
 
-# === Step 6: Create Retrieval QA Chain ===
-retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+# === Step 6: Evaluate Each Abstract ===
+results = []
+for doc in tqdm(docs, desc="Evaluating abstracts with LLM..."):
+    abstract = doc.page_content.strip()
+    metadata = doc.metadata
+    if not abstract:
+        continue
 
-qa_chain = RetrievalQA.from_chain_type(
-    llm=llm,
-    retriever=retriever,
-    chain_type="stuff",
-    chain_type_kwargs={"prompt": prompt}
-)
+    try:
+        llm_response = llm_chain.run({"abstract": abstract}).strip()
+        if "yes" in llm_response.lower():
+            decision = "Yes"
+        elif "no" in llm_response.lower():
+            decision = "No"
+        else:
+            decision = "Unclear"
+    except Exception as e:
+        decision = f"Error: {str(e)}"
 
-# === Step 7: Ask a Question ===
-query = "Summarize the benefit data for regulatory submission using the given criteria."
-result = qa_chain.run(query)
+    results.append({
+        "PMID": metadata.get("PMID", ""),
+        "Title": metadata.get("Title", ""),
+        "Abstract": abstract,
+        "LLM_Evaluation": decision
+    })
 
-# === Step 8: Print Final Output ===
-print("========== Final Summary ==========")
-print(result)
+# === Step 7: Convert to DataFrame ===
+df_result = pd.DataFrame(results)
+
+# === Step 8: Display Table ===
+from ace_tools import display_dataframe_to_user
+display_dataframe_to_user("PSUR Abstract Evaluation", df_result)
