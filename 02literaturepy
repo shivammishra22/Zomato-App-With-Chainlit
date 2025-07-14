@@ -1,110 +1,105 @@
 import pandas as pd
 import numpy as np
-import faiss
-import re
-from concurrent.futures import ThreadPoolExecutor
-from langchain_ollama import OllamaEmbeddings
-import ollama
+from langchain_community.document_loaders.csv_loader import CSVLoader
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.llms import Ollama
+from langchain_community.vectorstores import FAISS
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+from langchain_core.documents import Document
+from tqdm import tqdm
 
-# === STEP 1: Load CSV and extract required columns ===
-df = pd.read_csv("your_file.csv")  # Replace with actual CSV path
-df = df[["PMID", "Title", "Abstract"]].dropna(subset=["Abstract"])
+# === Step 1: Load CSV ===
+loader = CSVLoader(
+    file_path=r"C:\Users\assis\Downloads\Pubmed_cleaned_csv.csv",
+    encoding="utf-8",
+    source_column="Abstract",
+    metadata_columns=["PMID", "Title"],
+    csv_args={"delimiter": ",", "quotechar": '"', "skipinitialspace": True}
+)
+docs = loader.load()
 
-# === STEP 2: Convert Abstracts to Embeddings and Index ===
-embedding_model = OllamaEmbeddings(model="mxbai-embed-large:latest")
-abstract_list = df["Abstract"].tolist()
-abstract_embeddings = embedding_model.embed_documents(abstract_list)
-abstract_embeddings = np.array(abstract_embeddings)
+# === Step 2: Initialize Embedding Model ===
+embedding_model = OllamaEmbeddings(model="mxbai-embed-large")
 
-index = faiss.IndexFlatL2(abstract_embeddings.shape[1])
-index.add(abstract_embeddings)
+# === Step 3: Build FAISS Vector Store ===
+db = FAISS.from_documents(docs, embedding_model)
 
-# === STEP 3: Define query, keywords, and filter threshold ===
-query = "case of adverse reaction in paediatric or elderly population"
-keywords = ["adverse reaction", "overdose", "medication error", "pregnancy", "efficacy", "clinical trial"]
-threshold = 0.6
+# === Step 4: Define Evaluation Prompt and Chain ===
+eval_prompt = PromptTemplate.from_template(
+    """
+You are a pharmacovigilance expert. Evaluate the abstract below and answer:
+"Does this abstract provide information relevant to the 'Characterisation of Benefit Data' section of a PSUR based on the criteria listed?"
 
-query_vector = np.array([embedding_model.embed_query(query)])
-distances, indices = index.search(query_vector, k=100)  # Search top 100, we’ll filter for 10 matches
+Return only "Yes" or "No".
 
-# === STEP 4: Apply semantic + keyword filter ===
-filtered_rows = []
-for dist, idx in zip(distances[0], indices[0]):
-    if idx >= len(df): continue
-    abstract = df.iloc[idx]["Abstract"]
-    if dist <= threshold and any(re.search(kw, abstract, re.IGNORECASE) for kw in keywords):
-        filtered_rows.append(df.iloc[idx])
-    if len(filtered_rows) >= 10:
-        break
+Criteria: dose-response, duration, comparative efficacy, strengths/limitations, effect size, rigor, relevance.
 
-if not filtered_rows:
-    print("❌ No relevant abstracts found.")
-    exit()
-
-filtered_df = pd.DataFrame(filtered_rows).drop_duplicates()
-
-# === STEP 5: Prompts ===
-INCLUSION_PROMPT = """
-Check if the abstract discusses one or more of the following:
-- Suspected adverse reactions in humans, including those from published abstracts, solicited reports, or manuscripts.
-- Specific situations like pregnancy, paediatrics, elderly, off-label use, overdose, medication error, or misuse.
-- Adverse reactions due to product quality, falsified medicine, or transmission of infection.
-- Lack of therapeutic efficacy.
-- Review of non-company-sponsored clinical trial outcomes.
-- Aggregated adverse reaction data that could become a valid ICSR.
-If any of these are present, classify it as INCLUSION.
+Abstract:
+{abstract}
 """
+)
+llm = Ollama(model="llama3")
+eval_chain = LLMChain(llm=llm, prompt=eval_prompt)
 
-EXCLUSION_PROMPT = """
-Classify the abstract as EXCLUSION if:
-- No adverse event (AE) with company suspect product is discussed.
-- It refers only to animal/preclinical/in-vitro/ex-vivo studies.
-- There’s no or negative causality with company suspect product.
-- Suspect product is from a non-company (different MAH).
- No identifiable ICSR or medical relevance. 
+# === Step 5: Evaluate Abstracts and Add Scores ===
+results = []
+for doc in tqdm(docs, desc="Evaluating abstracts..."):
+    abstract = doc.page_content.strip()
+    meta = doc.metadata
+    if not abstract:
+        continue
+    resp = eval_chain.run({"abstract": abstract}).strip()
+    if "yes" in resp.lower():
+        decision, score = "Yes", 1
+    elif "no" in resp.lower():
+        decision, score = "No", 0
+    else:
+        decision, score = "Unclear", np.nan
+    results.append({
+        "PMID": meta.get("PMID", ""),
+        "Title": meta.get("Title", ""),
+        "Abstract": abstract,
+        "LLM_Evaluation": decision,
+        "Score": score
+    })
+
+# === Step 6: Create DataFrame and Save ===
+df_result = pd.DataFrame(results)
+df_result.to_csv("psur_abstract_evaluation_with_scores.csv", index=False)
+
+# === Step 7: Define Drug-Detection Prompt and Chain ===
+drug_prompt = PromptTemplate.from_template(
+    """
+You are a pharmacovigilance expert. Does the following abstract discuss *only* the drug sacubitril/valsartan? Return "Yes" or "No".
+
+Abstract:
+{abstract}
 """
+)
+drug_chain = LLMChain(llm=llm, prompt=drug_prompt)
 
-# === STEP 6: Classify and Summarize ===
-def classify_and_summarize(row):
-    pmid, title, abstract = row["PMID"], row["Title"], row["Abstract"]
-    try:
-        # Always run both prompts
-        response_inc = ollama.generate(model="llama3", prompt=INCLUSION_PROMPT + f"\n\nAbstract:\n{abstract}")
-        inclusion_result = response_inc["response"].strip()
+# === Step 8: Filter Abstracts via LLM Response ===
+filtered = []
+for doc in tqdm(docs, desc="Filtering for sacubitril/valsartan abstracts..."):
+    abstract = doc.page_content.strip()
+    if not abstract:
+        continue
+    resp = drug_chain.run({"abstract": abstract}).strip()
+    if "yes" in resp.lower():
+        filtered.append({
+            "PMID": doc.metadata.get("PMID", ""),
+            "Title": doc.metadata.get("Title", ""),
+            "Abstract": abstract,
+            "LLM_Evaluation": df_result.loc[df_result["PMID"] == doc.metadata.get("PMID"), "LLM_Evaluation"].values[0],
+            "Score": df_result.loc[df_result["PMID"] == doc.metadata.get("PMID"), "Score"].values[0]
+        })
+# === Step 9: Create Filtered DataFrame and Save ===
+df_filtered = pd.DataFrame(filtered)
+df_filtered.to_csv("filtered_abstracts_sacubitril_valsartan_llm.csv", index=False)
 
-        response_exc = ollama.generate(model="llama3", prompt=EXCLUSION_PROMPT + f"\n\nAbstract:\n{abstract}")
-        exclusion_result = response_exc["response"].strip()
+# === Step 10: Display to User ===
+from ace_tools import display_dataframe_to_user
 
-        # Summary prompt
-        summary_prompt = f'''Generate a short and precise summary of this abstract: "{abstract}". Start with "The abstract reports..."'''
-        response_sum = ollama.generate(model="llama3", prompt=summary_prompt)
-        summary = response_sum["response"].strip()
-
-        return {
-            "PMID": pmid,
-            "Title": title,
-            "INCLUSION": inclusion_result,
-            "EXCLUSION": exclusion_result,
-            "Summary": summary
-        }
-    except Exception as e:
-        return {
-            "PMID": pmid,
-            "Title": title,
-            "INCLUSION": "ERROR",
-            "EXCLUSION": "ERROR",
-            "Summary": f"Error: {str(e)}"
-        }
-
-# === STEP 7: Run in Parallel ===
-with ThreadPoolExecutor(max_workers=4) as executor:
-    results = list(executor.map(classify_and_summarize, [row for _, row in filtered_df.iterrows()]))
-
-# === STEP 8: Print Results ===
-for res in results:
-    print(f"\n📌 PMID: {res['PMID']}")
-    print(f"📘 Title: {res['Title']}")
-    print(f"✅ INCLUSION Check:\n{res['INCLUSION']}")
-    print(f"❌ EXCLUSION Check:\n{res['EXCLUSION']}")
-    print(f"📝 Summary:\n{res['Summary']}")
-    print("=" * 120)
+display_dataframe_to_user("PSUR Abstracts with Scores", df_result)
+display_dataframe_to_user("Sacubitril/Valsartan Abstracts", df_filtered)
