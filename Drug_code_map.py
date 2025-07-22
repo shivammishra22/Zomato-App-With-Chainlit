@@ -1,3 +1,6 @@
+import pandas as pd
+
+# Your drug_code_map dictionary
 drug_code_map = {
     "esomeprazole": "A02BC05",
     "olanzapine": "N05AH03",
@@ -34,3 +37,11 @@ drug_code_map = {
     "candesartan": "C09CA06",
     "montelukast": "R03DC03"
 }
+
+# Convert to DataFrame
+df = pd.DataFrame(list(drug_code_map.items()), columns=["Drug Name", "Drug Code"])
+
+# Save to Excel file
+df.to_excel("drug_code_map.xlsx", index=False)
+
+print("Excel file saved as 'drug_code_map.xlsx'")
