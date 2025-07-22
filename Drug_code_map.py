@@ -1,47 +1,38 @@
 import pandas as pd
 
-# Your drug_code_map dictionary
-drug_code_map = {
-    "esomeprazole": "A02BC05",
-    "olanzapine": "N05AH03",
-    "levetiracetam": "N03AX14",
-    "tadalafil": "G04BE08",
-    "remdesivir": "J05AB16",
-    "quetiapine": "N05AH04",
-    "risperidone": "N05AX08",
-    "zolmitriptan": "N02CC03",
-    "budesonide": "A07EA06",
-    "pregabalin": "N03AX24",
-    "deferasirox": "V03AC03",
-    "valsartan": "C09CA03",
-    "rivaroxaban": "B01AF01",
-    "tacrolimus": "L04AD02",
-    "azacitidine": "L01BC07",
-    "fluoxetine": "N06AB03",
-    "metoprolol": "C07AB02",
-    "olmesartan medoxomil": "C09CA08",
-    "pantoprazole": "A02BC02",
-    "telmisartan": "C09CA07",
-    "irbesartan": "C09CA04",
-    "eslicarbazepine": "N03AF04",
-    "doxycycline": "J01AA02",
-    "benazepril": "C09AA07",
-    "lamotrigine": "N03AX09",
-    "lacosamide": "N03AX18",
-    "azithromycin": "J01FA10",
-    "acetazolamide": "S01EC01",
-    "rabeprazole": "A02BC04",
-    "olopatadine": "S01GX09",
-    "ziprasidone": "N05AE04",
-    "cinacalcet": "H05BX01",
-    "candesartan": "C09CA06",
-    "montelukast": "R03DC03"
+# === Step 1: Create Hash Map for Product to Dosage Form ===
+product_dosage_map = {
+    "Esomeprazole-Gastro-resistant": "Gastro-resistant",
+    "Zipola5-Film coated Tablet": "Film coated Tablet",
+    "Zipola10-Film coated Tablet": "Film coated Tablet",
+    "Jubilonz OD5- Oro dispersible tablet": "Oro dispersible tablet",
+    "Jubilonz OD10-Oro dispersible tablet": "Oro dispersible tablet",
+    "SCHIZOLANZ-Oro dispersible tablet": "Oro dispersible tablet",
+    "Olanzapine film coated tablets- Film coated Tablet": "Film coated Tablet"
 }
 
-# Convert to DataFrame
-df = pd.DataFrame(list(drug_code_map.items()), columns=["Drug Name", "Drug Code"])
+# === Step 2: Read Excel File ===
+excel_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\marketing_exposure_tables.xlsx"
 
-# Save to Excel file
-df.to_excel("drug_code_map.xlsx", index=False)
+try:
+    df = pd.read_excel(excel_path, engine='openpyxl')
+except Exception as e:
+    print(f"❌ Error reading Excel: {e}")
+    exit()
 
-print("Excel file saved as 'drug_code_map.xlsx'")
+# === Step 3: Clean and Match Product Names ===
+def map_dosage(product_name):
+    for key in product_dosage_map:
+        if key.lower() in str(product_name).lower():
+            return product_dosage_map[key]
+    return ""
+
+df["Dosage Form (Units)"] = df["Molecule"].apply(map_dosage)
+
+# === Step 4: Save Updated Excel File ===
+try:
+    df.to_excel(excel_path, index=False)
+    print(f"✅ Updated Excel saved with 'Dosage Form (Units)' column at: {excel_path}")
+except Exception as e:
+    print(f"❌ Error saving Excel: {e}")
+    
