@@ -1,260 +1,360 @@
-import os
-import pandas as pd
-from docx import Document
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-def extract_specific_table(docx_path, keywords):
-    doc = Document(docx_path)
-    matched_table = None
-
-    for table in doc.tables:
-        for row in table.rows:
-            row_text = [cell.text.strip() for cell in row.cells]
-            if any(keyword in cell for cell in row_text for keyword in keywords):
-                matched_table = table
-                break
-        if matched_table:
-            break
-
-    if matched_table:
-        extracted_data = []
-        for row in matched_table.rows:
-            extracted_data.append([cell.text.strip() for cell in row.cells])
-
-        # Remove duplicate header rows if the first two rows are identical
-        if len(extracted_data) > 1 and extracted_data[0] == extracted_data[1]:
-            extracted_data.pop(1)
-
-        return extracted_data
-    else:
-        print("❌ No matching table found.")
-        return []
-
-def save_table_to_excel(table_data, excel_path):
-    os.makedirs(os.path.dirname(excel_path), exist_ok=True)
-    df = pd.DataFrame(table_data[1:], columns=table_data[0])  # Use first row as header
-    df.to_excel(excel_path, sheet_name='Extracted_Table', index=False)
-    print(f"✅ Specific table saved to {excel_path}")
-
-# ✅ Replace with actual paths
-docx_path = r"C:\Users\shivam.mishra2\Downloads\embedding\01PSUR\Data request form.docx"
-excel_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\intial_table1.xlsx"
-
-# Keywords to identify the specific table
-keywords = ["Molecular Product", "Study Number", "Test Product Name","Active comparator name","TestProduct","Active Comparator","Placebo","Total"]
-# Extract and save
-table_data = extract_specific_table(docx_path, keywords)
-if table_data:
-    save_table_to_excel(table_data, excel_path)
-
-######Second file
 import os
 import re
 import pandas as pd
+import numpy as np
 from docx import Document
+import requests
+from bs4 import BeautifulSoup
+import urllib3
 
-def extract_specific_table(docx_path, keywords):
-    doc = Document(docx_path)
-    matched_table = None
+# =========================================================
+# === 0. CONFIG / CONSTANTS ===============================
+# =========================================================
 
-    for table in doc.tables:
-        for row in table.rows:
-            row_text = [cell.text.strip() for cell in row.cells]
-            if any(keyword in cell for cell in row_text for keyword in keywords):
-                matched_table = table
-                break
-        if matched_table:
+DOCX_PATH = r"C:\Users\shivam.mishra2\Downloads\ALL_PSUR_File\PSUR_all _Data\Olanzapine PSUR_South Africa_29-Sep-17 to 31-Mar-25\Draft\DRA\Data request form_olanzapine.docx"
+SEARCH_TEXT = "Cumulative sales data sale required"
+EXCEL_OUTPUT_PATH = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\marketing_exposure_tables.xlsx"
+DDD_EXCEL_PATH = r"drug_code_map_with_ddd.xlsx"
+
+COUNTRY = "South Africa"
+MEDICINE = "Olanzapine"
+PLACE = "South Africa"
+DATE = "2020-01-01"
+
+# === NEW / UPDATED ===
+# Map of product names to dosage forms
+PRODUCT_DOSAGE_MAP = {
+    "Esomeprazole": "Gastro-resistant",
+    "Zipola 5": "Film coated Tablet",
+    "Zipola 10": "Film coated Tablet",
+    "Jubilonz OD10": "Oro dispersible tablet",
+    "Jubilonz OD5": "Oro dispersible tablet",
+    "SCHIZOLANZ": "Oro dispersible tablet",
+    "Olanzapine film coated tablets": "Film coated Tablet",
+    "Olanzapine": "Film coated Tablet"  # add generic too, just in case
+}
+
+# =========================================================
+# === 1. UTILITIES ========================================
+# =========================================================
+
+def extract_table_after_text(doc, search_text):
+    pattern = re.compile(re.escape(search_text), re.IGNORECASE)
+    found_index = None
+
+    for i, para in enumerate(doc.paragraphs):
+        if pattern.search(para.text):
+            found_index = i
             break
 
-    if matched_table:
-        extracted_data = []
-        for row in matched_table.rows:
-            extracted_data.append([cell.text.strip() for cell in row.cells])
+    if found_index is None:
+        print(f"❌ Text not found: {search_text}")
+        return None
 
-        if len(extracted_data) > 1 and extracted_data[0] == extracted_data[1]:
-            extracted_data.pop(1)
-
-        return extracted_data
+    para_counter = 0
+    table_counter = 0
+    for block in doc.element.body:
+        if block.tag.endswith('p'):
+            para_counter += 1
+        elif block.tag.endswith('tbl'):
+            if para_counter > found_index:
+                table = doc.tables[table_counter]
+                break
+            table_counter += 1
     else:
-        print("❌ No matching table found.")
-        return []
+        print(f"❌ No table found after: {search_text}")
+        return None
+
+    table_data = []
+    for row in table.rows:
+        table_data.append([cell.text.strip() for cell in row.cells])
+
+    # Remove duplicate header row if Word duplicated it
+    if len(table_data) > 1 and table_data[0] == table_data[1]:
+        table_data.pop(1)
+
+    return table_data
+
 
 def save_table_to_excel(table_data, excel_path):
     os.makedirs(os.path.dirname(excel_path), exist_ok=True)
     df = pd.DataFrame(table_data[1:], columns=table_data[0])
-    df.to_excel(excel_path, sheet_name='Extracted_Table', index=False)
-    print(f"✅ Specific table saved to {excel_path}")
+    df.to_excel(excel_path, index=False)
+    print(f"✅ Table saved to: {excel_path}")
 
-def generate_summary_doc(excel_path, output_doc_path):
+
+def generate_fallback_doc(medicine):
+    fallback_doc = Document()
+    fallback_doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
+    placeholder_text = (
+        f"No cumulative and interval patient exposure from marketing experience was available as the MAH "
+        f"has not marketed its product {medicine} in any country since obtaining initial granting of MA "
+        f"till the DLP of this report."
+    )
+    fallback_doc.add_paragraph(placeholder_text)
+    fallback_doc.save(f"{medicine}_Exposure.docx")
+    print(f"📄 Placeholder Word document saved as '{medicine}_Exposure.docx'")
+
+
+def add_table_with_data(doc, dataframe, title):
+    doc.add_heading(title, level=2)
+    table = doc.add_table(rows=1, cols=len(dataframe.columns))
+    table.style = 'Table Grid'
+    hdr_cells = table.rows[0].cells
+    for i, col_name in enumerate(dataframe.columns):
+        hdr_cells[i].text = str(col_name)
+    for _, row in dataframe.iterrows():
+        row_cells = table.add_row().cells
+        for i, item in enumerate(row):
+            row_cells[i].text = "" if pd.isna(item) else str(item)
+
+
+def create_clean_total_row(dataframe, total_col="Patients Exposure (PTY) for period"):
+    total = dataframe[total_col].sum(numeric_only=True)
+    total_row = {col: "" for col in dataframe.columns}
+    total_row["Country"] = "Total"
+    total_row[total_col] = int(total)
+    return pd.DataFrame([total_row])
+
+
+def map_dosage(product_name):
+    """Return dosage form string if any key in PRODUCT_DOSAGE_MAP is substring of product_name (case-insensitive)."""
+    if pd.isna(product_name):
+        return ""
+    name = str(product_name).lower()
+    for key, val in PRODUCT_DOSAGE_MAP.items():
+        if key.lower() in name:
+            return val
+    return ""
+
+
+def add_dosage_column(df):
+    """
+    Safely add Dosage Form column. Tries 'Product' first, then 'Molecule'.
+    """
+    col_to_use = None
+    for c in ["Product", "Molecule"]:
+        if c in df.columns:
+            col_to_use = c
+            break
+
+    if col_to_use is None:
+        print("⚠️ Neither 'Product' nor 'Molecule' column found. Skipping dosage mapping.")
+        return df
+
+    df["Dosage Form (Units)"] = df[col_to_use].apply(map_dosage)
+    return df
+
+
+# =========================================================
+# === 2. CORE PROCESS =====================================
+# =========================================================
+
+def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, medicine, place, date):
     df = pd.read_excel(excel_path, engine='openpyxl')
 
-    columns = pd.MultiIndex.from_tuples([
-        ('Molecule/Product', ''), ('Study Number', ''), ('Study Title', ''), ('Test product name', ''),
-        ('Active comparator name', ''), ('No. of subjects enrolled', 'Test Product'),
-        ('No. of subjects enrolled', 'Active Comparator'), ('No. of subjects enrolled', 'Placebo'),
-        ('No. of subjects enrolled', 'Total'), ('Gender distribution of subjects enrolled', 'Male'),
-        ('Gender distribution of subjects enrolled', 'Female'), ('Age distribution of subjects enrolled', '<18 years'),
-        ('Age distribution of subjects enrolled', '18-65 years'), ('Age distribution of subjects enrolled', '>65 years'),
-        ('Racial distribution of subjects enrolled', 'Asian'), ('Racial distribution of subjects enrolled', 'Black'),
-        ('Racial distribution of subjects enrolled', 'Caucasian'), ('Racial distribution of subjects enrolled', 'Other'),
-        ('Racial distribution of subjects enrolled', 'Unknown')
-    ])
+    # === NEW / UPDATED ===
+    # Ensure dosage form column exists
+    df = add_dosage_column(df)
 
-    df.columns = columns
-    df_new = df.iloc[2:].copy()
-    df_new.reset_index(drop=True, inplace=True)
+    # Clean / convert columns
+    if "Strength in mg" in df.columns:
+        df["Strength in mg"] = df["Strength in mg"].astype(str).str.replace("mg", "", regex=False).str.strip()
+        df["Strength in mg"] = pd.to_numeric(df["Strength in mg"], errors='coerce')
 
-    columns_to_convert = [
-        ('No. of subjects enrolled', 'Test Product'), ('No. of subjects enrolled', 'Active Comparator'),
-        ('No. of subjects enrolled', 'Placebo'), ('No. of subjects enrolled', 'Total'),
-        ('Gender distribution of subjects enrolled', 'Male'), ('Gender distribution of subjects enrolled', 'Female'),
-        ('Age distribution of subjects enrolled', '<18 years'), ('Age distribution of subjects enrolled', '18-65 years'),
-        ('Age distribution of subjects enrolled', '>65 years'), ('Racial distribution of subjects enrolled', 'Asian'),
-        ('Racial distribution of subjects enrolled', 'Black'), ('Racial distribution of subjects enrolled', 'Caucasian'),
-        ('Racial distribution of subjects enrolled', 'Other'), ('Racial distribution of subjects enrolled', 'Unknown')
-    ]
-    df_new[columns_to_convert] = df_new[columns_to_convert].apply(pd.to_numeric, errors='coerce')
+    pack_column = next((col for col in ["Pack", "Packs"] if col in df.columns), None)
+    if pack_column:
+        df[pack_column] = (
+            df[pack_column]
+            .astype(str)
+            .str.replace(",", "", regex=False)
+            .str.extract(r'(\d+)')[0]
+        )
+        df[pack_column] = pd.to_numeric(df[pack_column], errors='coerce').fillna(0).astype(int)
 
-    target_columns = [
-        ('Age distribution of subjects enrolled', '<18 years'),
-        ('Age distribution of subjects enrolled', '18-65 years'),
-        ('Age distribution of subjects enrolled', '>65 years'),
-        ('Racial distribution of subjects enrolled', 'Asian'),
-        ('Racial distribution of subjects enrolled', 'Black'),
-        ('Racial distribution of subjects enrolled', 'Caucasian')
-    ]
-    non_zero_columns = [col for col in target_columns if df_new[col].sum() != 0]
+    if "Pack size" in df.columns:
+        pack_size_extracted = df["Pack size"].astype(str).str.extract(r'(\d+)\s*[xX]\s*(\d+)')
+        df["Pack size"] = (
+            pd.to_numeric(pack_size_extracted[0], errors='coerce').fillna(1).astype(int)
+            * pd.to_numeric(pack_size_extracted[1], errors='coerce').fillna(1).astype(int)
+        )
 
-    doc = Document()
-    doc.add_heading('1 Jubilant Generics Limited', level=1)
-    doc.add_heading('2 Levetiracetam Periodic Safety Update Report', level=2)
-    doc.add_paragraph('Reporting period: 30-Nov-2024 to 30-Nov-2024')
-    doc.add_heading('5 ESTIMATED EXPOSURE AND USE PATTERNS', level=2)
-    doc.add_heading('5.1 General considerations', level=3)
-    doc.add_paragraph(
-        'For clinical trials patient exposure can be accurately calculated because dosage and duration of treatment are clearly known. '
-        'In terms of post marketing use patient exposure cannot be accurately calculated for certain reasons such as varying dosage and '
-        'duration of treatment as well as changing or unknown patient compliance.'
+    unit_col = "Number of tablets / Capsules/Injections"
+    if unit_col in df.columns:
+        df[unit_col] = (
+            df[unit_col].astype(str)
+            .str.replace(",", "", regex=False)
+            .str.split(":").str[-1]
+            .str.strip()
+        )
+        df[unit_col] = pd.to_numeric(df[unit_col], errors='coerce')
+
+    if "Delivered quantity (mg)" in df.columns:
+        df["Delivered quantity (mg)"] = pd.to_numeric(
+            df["Delivered quantity (mg)"].astype(str).str.replace(",", "", regex=False),
+            errors='coerce'
+        )
+
+    # Rename Product -> Molecule once (if Product exists)
+    if "Product" in df.columns and "Molecule" not in df.columns:
+        df.rename(columns={"Product": "Molecule"}, inplace=True)
+
+    # Add DDD column
+    df['DDD*'] = f'{int(ddd_value)} mg'
+
+    # Calculate Sales & Exposure
+    if unit_col in df.columns and "Strength in mg" in df.columns:
+        df["Sales Figure (mg) or period/Volume of sales (in mg)"] = df[unit_col] * df["Strength in mg"]
+    else:
+        df["Sales Figure (mg) or period/Volume of sales (in mg)"] = np.nan
+
+    df["Patients Exposure (PTY) for period"] = (
+        df["Sales Figure (mg) or period/Volume of sales (in mg)"] / (ddd_value * 365)
     )
-    doc.add_heading('5.2 Cumulative Subject Exposure in Clinical Trials', level=3)
+    df["Patients Exposure (PTY) for period"] = df["Patients Exposure (PTY) for period"].round(0)
 
-    total_subjects = int(df_new[('No. of subjects enrolled', 'Total')].sum())
-    num_studies = len(df_new)
-    age_group = non_zero_columns[0][1] if len(non_zero_columns) > 0 else "Unknown"
-    gender_group = 'Male' if df_new[('Gender distribution of subjects enrolled', 'Male')].sum() > 0 else 'Female'
-    medicine_name="levetiracetam"
+    # Split by country
+    if "Country" not in df.columns:
+        print("⚠️ 'Country' column missing in Excel. Will treat all as Non-country.")
+        df["Country"] = "Unknown"
+
+    df_country = df[df["Country"] == country_name].copy()
+    df_non_country = df[df["Country"] != country_name].copy()
+
+    # Totals
+    df_country_total_row = create_clean_total_row(df_country)
+    df_non_country_total_row = create_clean_total_row(df_non_country)
+
+    df_country = pd.concat([df_country, df_country_total_row], ignore_index=True)
+    df_non_country = pd.concat([df_non_country, df_non_country_total_row], ignore_index=True)
+
+    df_country.fillna("", inplace=True)
+    df_non_country.fillna("", inplace=True)
+
+    sa_total = df_country_total_row["Patients Exposure (PTY) for period"].values[0]
+    non_sa_total = df_non_country_total_row["Patients Exposure (PTY) for period"].values[0]
+    combined_total = int(sa_total) + int(non_sa_total)
+
+    print(f"📊 Combined Total Exposure: {combined_total}")
+
+    if sa_total == 0:
+        generate_fallback_doc(medicine)
+        return
+
+    # Generate Word doc
+    doc = Document()
+    doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
+
     summary_text = (
-        f"Jubilant as MAH has not conducted any Clinical Trials. However, Jubilant has conducted {num_studies} BA/BE study with {medicine_name} till the DLP of the PSUR 30-Nov-2024 "
-        f"and cumulative subject exposure in the completed clinical trial were {total_subjects} subjects.\n\n"
-        f"Of these {total_subjects}, all were {gender_group} subjects of age distribution between {age_group} years. "
-        "Cumulative subject exposure to {medicine_name} in BA/BE studies is given in the table below:"
+        f"The MAH obtained initial MA for their generic formulation of {medicine} in {place} on {date}.\n"
+        f"The post-authorization exposure to {medicine} during the cumulative period was {combined_total} patients "
+        f"({place}: {int(sa_total)} and Non {place}: {int(non_sa_total)}) treatment days approximately and presented in Table 3."
     )
     doc.add_paragraph(summary_text)
-    doc.save(output_doc_path)
-    print(f"✅ Summary document saved to {output_doc_path}")
 
-# Paths
-docx_path = r"C:\Users\shivam.mishra2\Downloads\embedding\01PSUR\Data request form.docx"
-excel_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\intial_table1.xlsx"
-output_doc_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\Section5.docx"
+    # === NEW / UPDATED === Ensure Dosage Form col appears in Word too
+    add_table_with_data(doc, df_country, f"                                                      {country_name} ")
+    add_table_with_data(doc, df_non_country, f"                                                      Non-{country_name} ")
 
-keywords = ["Molecular Product", "Study Number", "Test Product Name", "Active comparator name", "TestProduct", "Active Comparator", "Placebo", "Total"]
-
-# Run the process
-table_data = extract_specific_table(docx_path, keywords)
-if table_data:
-    save_table_to_excel(table_data, excel_path)
-    generate_summary_doc(excel_path, output_doc_path)
-####Third file
-import re
-import os
-from docx import Document
-
-def delete_tables_with_keywords(doc, keywords):
-    tables_to_delete = []
-    for table in doc.tables:
-        table_text = " ".join(cell.text for row in table.rows for cell in row.cells)
-        if any(re.search(keyword, table_text, re.IGNORECASE) for keyword in keywords):
-            tables_to_delete.append(table)
-    for table in tables_to_delete:
-        tbl = table._element
-        tbl.getparent().remove(tbl)
-
-def extract_text_before_stop_line(doc, stop_line):
-    full_text = "\n".join([para.text for para in doc.paragraphs])
-    match = re.search(rf"^(.*?)\b{re.escape(stop_line)}\b", full_text, re.DOTALL | re.IGNORECASE)
-    return match.group(1) if match else ""
-
-def delete_multiple_paragraphs(doc, lines_to_delete_text):
-    lines_to_delete = [line.strip() for line in lines_to_delete_text.splitlines() if line.strip()]
-    for para in doc.paragraphs:
-        if para.text.strip() in lines_to_delete:
-            p = para._element
-            p.getparent().remove(p)
-            p._p = p._element = None
-
-def remove_blank_paragraphs(doc):
-    for para in doc.paragraphs:
-        if not para.text.strip():
-            p = para._element
-            p.getparent().remove(p)
-def clear_text(doc):
-    # Clear all paragraphs
-    for para in doc.paragraphs:
-        para.clear()
-
-def process_document(doc_path, keywords, stop_line):
-    doc = Document(doc_path)
-
-    # Step 1: Delete tables with keywords
-    delete_tables_with_keywords(doc, keywords)
-
-    # Step 2: Extract text before stop line
-    extracted_text = extract_text_before_stop_line(doc, stop_line)
-
-    # Step 3: Delete matching paragraphs
-    if extracted_text:
-        delete_multiple_paragraphs(doc, extracted_text)
-
-    # Step 4: Remove blank paragraphs
-    remove_blank_paragraphs(doc)
-
-    clear_text(doc)
-
-    # Step 5: Save final document
-    dir_name = os.path.dirname(doc_path)
-    final_path = os.path.join(dir_name, "final_Table.docx")
-    doc.save(final_path)
-    print(f"Document saved to: {final_path}")
+    out_doc_name = f"{medicine}_Exposure.docx"
+    doc.save(out_doc_name)
+    print(f"✅ Word document saved as '{out_doc_name}'")
 
 
-# Example usage
-keywords = ["Country", "Signal term"]
-stop_line = "Pooled literature Data: PVG Department"
-doc_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\final_Table.docx"
+# =========================================================
+# === 3. DDD FALLBACK FETCH ===============================
+# =========================================================
 
-process_document(doc_path, keywords, stop_line)
-#### Fourth File
-from docx import Document
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Paths to the documents
-doc1_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\Section5.docx"
-doc2_path = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\final_Table.docx"
+def fetch_ddd_fallback(medicine, code):
+    if pd.isna(code):
+        return np.nan
+    url = f"https://atcddd.fhi.no/atc_ddd_index/?code={code}"
+    try:
+        response = requests.get(url, verify=False, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, "html.parser")
+        ddd_values = soup.find_all("td", align="right")
+        for td in ddd_values:
+            value = td.get_text(strip=True)
+            if value.replace('.', '', 1).isdigit():
+                print(f"Fetched fallback DDD for {medicine} ({code}): {value}")
+                return float(value)
+        print(f"No DDD value found on fallback site for {medicine} ({code})")
+        return np.nan
+    except Exception as e:
+        print(f"Error during fallback DDD fetch for {medicine} ({code}): {e}")
+        return np.nan
 
-# Load both documents
-doc1 = Document(doc1_path)
-doc2 = Document(doc2_path)
 
-# Create a new document for the merged content
-merged_doc = Document()
+# =========================================================
+# === 4. MAIN =============================================
+# =========================================================
 
-# Append content from the first document
-for element in doc1.element.body:
-    merged_doc.element.body.append(element)
+if __name__ == "__main__":
+    # Read the DDD Excel (if available)
+    try:
+        ddd_df = pd.read_excel(DDD_EXCEL_PATH)
+    except Exception as e:
+        print(f"⚠️ Could not read DDD Excel: {e}")
+        ddd_df = pd.DataFrame()
 
-# Append content from the second document
-for element in doc2.element.body:
-    merged_doc.element.body.append(element)
+    try:
+        if not os.path.exists(DOCX_PATH):
+            raise FileNotFoundError(f"File not found: {DOCX_PATH}")
 
-# Save the merged document
-merged_doc.save(r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\mergedFINAL_document.docx")
-print("Documents merged successfully.")
+        doc = Document(DOCX_PATH)
+        table_data = extract_table_after_text(doc, SEARCH_TEXT)
+
+        # --- DDD VALUE LOGIC START ---
+        ddd_value = np.nan
+        if not ddd_df.empty and "Drug Name" in ddd_df.columns:
+            ddd_row = ddd_df[ddd_df["Drug Name"].str.lower() == MEDICINE.lower()]
+        else:
+            ddd_row = pd.DataFrame()
+
+        if not ddd_row.empty and "DDD Value" in ddd_row.columns and not pd.isna(ddd_row.iloc[0]["DDD Value"]):
+            ddd_value = ddd_row.iloc[0]["DDD Value"]
+            print(f"✅ DDD value found in Excel: {ddd_value}")
+        else:
+            code = np.nan
+            if not ddd_row.empty and "Drug Code" in ddd_row.columns:
+                code = ddd_row.iloc[0]["Drug Code"]
+            elif "Drug Code" in getattr(ddd_df, "columns", []):
+                possible = ddd_df[ddd_df["Drug Name"].str.lower().str.contains(MEDICINE.lower(), na=False)]
+                if not possible.empty:
+                    code = possible.iloc[0]["Drug Code"]
+
+            ddd_value = fetch_ddd_fallback(MEDICINE, code)
+            if pd.isna(ddd_value):
+                print("❌ DDD value not found anywhere. Will use fallback document.")
+        # --- DDD VALUE LOGIC END ---
+
+        if table_data and not pd.isna(ddd_value):
+            save_table_to_excel(table_data, EXCEL_OUTPUT_PATH)
+
+            # === NEW / UPDATED ===
+            # After saving initial excel, reopen & add dosage column (if not already inside calc fn)
+            calculate_exposure_and_generate_doc(EXCEL_OUTPUT_PATH, ddd_value, COUNTRY, MEDICINE, PLACE, DATE)
+
+            # Overwrite the Excel with dosage column if needed (calc function already added it)
+            try:
+                final_df = pd.read_excel(EXCEL_OUTPUT_PATH, engine='openpyxl')
+                final_df = add_dosage_column(final_df)  # idempotent
+                final_df.to_excel(EXCEL_OUTPUT_PATH, index=False)
+                print(f"✅ Updated Excel saved with 'Dosage Form (Units)' column at: {EXCEL_OUTPUT_PATH}")
+            except Exception as e:
+                print(f"❌ Error saving updated Excel: {e}")
+
+        else:
+            print("⚠️ Table not found after search text or DDD is missing. Generating fallback document.")
+            generate_fallback_doc(MEDICINE)
+
+    except Exception as e:
+        print(f"⚠️ Error: {e}")
+        generate_fallback_doc(MEDICINE)
+                
