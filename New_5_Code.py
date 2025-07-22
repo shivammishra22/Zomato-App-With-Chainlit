@@ -227,15 +227,4 @@ if __name__ == "__main__":
         print(f"⚠️ Error: {e}")
         generate_fallback_doc(medicine)
 
-MAke the hash map of the below Product
-Esomeprazole-Gastro-resistant
-Zipola5-Film coated Tablet
-Zipola10-Film coated Tablet
-Jubilonz OD5- Oro dispersible tablet
-Jubilonz OD10-Oro dispersible tablet
-SCHIZOLANZ-Oro dispersible tablet
-Olanzapine film coated tablets- Film coated Tablet
 
-After making the hash map use this excel sheet C:\Users\shivam.mishra2\Downloads\New_Psur_File\marketing_exposure_tables.xlsx
-and use the hash map product name if the product name match with this hash map add one column by the name "Dosage Form (Units)" and add all value by taking from the hash map 
-Gnerate the full python code for that
