@@ -83,7 +83,7 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
 
     df["Delivered quantity (mg)"] = pd.to_numeric(df["Delivered quantity (mg)"].astype(str).str.replace(",", ""), errors='coerce')
     df.rename(columns={"Product": "Molecule"}, inplace=True)
-
+    df['DDD*']=f'{int(ddd_value)} mg'
     df["Sales Figure (mg) or period/Volume of sales (in mg)"] = df[unit_col] * df["Strength in mg"]
     df["Patients Exposure (PTY) for period"] = df["Sales Figure (mg) or period/Volume of sales (in mg)"] / (ddd_value * 365)
     df["Patients Exposure (PTY) for period"] = df["Patients Exposure (PTY) for period"].round(0)
@@ -147,8 +147,8 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
     add_table_with_data(doc, df_country, f"                                                      {country_name} ")
     add_table_with_data(doc, df_non_country, f"                                                      Non-{country_name} ")
 
-    doc.save("Esomeprazole_Exposure.docx")
-    print("✅ Word document saved as 'Esomeprazole_Exposure.docx'")
+    doc.save("Olanzapine_Exposure.docx")
+    print("✅ Word document saved as 'Olanzapine_Exposure.docx'")
 
 # --- Fallback DDD fetch using web ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -181,7 +181,7 @@ if __name__ == "__main__":
 
     ddd_excel_path = "drug_code_map_with_ddd.xlsx"  # Path to your DDD Excel
     country = "South Africa"
-    medicine = "Esomeprazole"
+    medicine = "Olanzapine"
     place = "South Africa"
     date = "2020-01-01"
 
