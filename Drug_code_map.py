@@ -2,13 +2,13 @@ import pandas as pd
 
 # === Step 1: Create Hash Map for Product to Dosage Form ===
 product_dosage_map = {
-    "Esomeprazole-Gastro-resistant": "Gastro-resistant",
-    "Zipola5-Film coated Tablet": "Film coated Tablet",
-    "Zipola10-Film coated Tablet": "Film coated Tablet",
-    "Jubilonz OD5- Oro dispersible tablet": "Oro dispersible tablet",
-    "Jubilonz OD10-Oro dispersible tablet": "Oro dispersible tablet",
-    "SCHIZOLANZ-Oro dispersible tablet": "Oro dispersible tablet",
-    "Olanzapine film coated tablets- Film coated Tablet": "Film coated Tablet"
+    "Esomeprazole": "Gastro-resistant",
+    "Zipola 5": "Film coated Tablet",
+    "Zipola 10": "Film coated Tablet",
+    "Jubilonz OD10": "Oro dispersible tablet",
+    "Jubilonz OD5": "Oro dispersible tablet",
+    "SCHIZOLANZ": "Oro dispersible tablet",
+    "Olanzapine film coated tablets": "Film coated Tablet"
 }
 
 # === Step 2: Read Excel File ===
@@ -27,7 +27,7 @@ def map_dosage(product_name):
             return product_dosage_map[key]
     return ""
 
-df["Dosage Form (Units)"] = df["Molecule"].apply(map_dosage)
+df["Dosage Form (Units)"] = df["Product"].apply(map_dosage)
 
 # === Step 4: Save Updated Excel File ===
 try:
