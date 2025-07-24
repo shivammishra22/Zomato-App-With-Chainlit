@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+
 import pandas as pd
 import re
 from tqdm.auto import tqdm
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.chat_models import ChatOllama
 
-# --- 1. Load your data ---
-# Replace "input.csv" with your actual file
-df = pd.read_csv("input.csv", dtype=str)
+ # Ensure this file exists in your working directory
 
 # --- 2. Get the indication from the user ---
-indication = input("Enter the therapeutic indication to evaluate against the abstracts: ").strip()
+indication = input("Enter the therapeutic indication to evaluate against the abstracts: ").strip().lower()
 
 # --- 3. Build the prompt template with reason request ---
 template = ChatPromptTemplate.from_messages([
-    ("system", """You are a pharmacovigilance expert generating the PSUR sub‑section titled “Characterisation of Benefits”.
+    ("system", f"""/set nothink
+You are a pharmacovigilance expert generating the PSUR sub‑section titled “Characterisation of Benefits”.
 
 For each abstract, evaluate:
 1) Strength of evidence (comparators, effect size, stats, consistency, methodology)  
@@ -27,8 +27,8 @@ For each abstract, evaluate:
 6) Comparative efficacy
 
 Also:
-- Does the abstract support the indication: "{Indication}"?  Provide “Yes” or “No” **and** a brief reason for your choice.
-- List any *other* indications mentioned.
+- Does the abstract support the indication: "{indication}"? Provide “Yes” or “No” **and** a brief reason for your choice.
+- List any *other* proven benefits or indications mentioned in the abstract that are **different** from "{indication}". If none, write "None".
 
 Respond exactly in this format (one value per line):
 Relevance: Relevant or Not Relevant  
@@ -39,7 +39,7 @@ Other Indications: [comma‑separated list or 'None']"""),
 ])
 
 # --- 4. Initialize the model & chain ---
-llm = ChatOllama(model="gemma3:4b", temperature=0.1, num_ctx=1000)
+llm = ChatOllama(model="qwen3:4b", temperature=0.1, num_ctx=1000)
 chain = template | llm
 
 # --- 5. Prepare regexes for parsing ---
@@ -57,7 +57,7 @@ for abstract in tqdm(df["Abstract"], desc="Evaluating abstracts"):
     rel    = "Not Available"
     match  = "Not Available"
     reason = ""
-    other  = ""
+    other  = "None"
 
     for line in resp.splitlines():
         if m := pat_rel.match(line):
@@ -67,9 +67,14 @@ for abstract in tqdm(df["Abstract"], desc="Evaluating abstracts"):
         elif m := pat_reason.match(line):
             reason = m.group(1).strip()
         elif m := pat_other.match(line):
-            other = m.group(1).strip()
-            if other.lower() in ("none", "n/a", "not applicable", ""):
-                other = ""
+            other_raw = m.group(1).strip()
+            if other_raw.lower() in ("none", "n/a", "not applicable", ""):
+                other = "None"
+            else:
+                # Filter out the user-provided indication if it appears in other indications
+                other_list = [ind.strip() for ind in other_raw.split(",")]
+                filtered = [ind for ind in other_list if ind.lower() != indication]
+                other = ", ".join(filtered) if filtered else "None"
 
     results.append((rel, match, reason, other))
 
@@ -80,7 +85,7 @@ out_df[["Relevance", "Indication Match", "Reason", "Other Indications"]] = pd.Da
 )
 
 # --- 8. Save a clean CSV ---
-out_file = "results_with_reasons.csv"
+out_file = "hello.csv"
 out_df.to_csv(out_file, index=False)
 
 print(f"\n✅ Done! Results saved to '{out_file}'\n")
