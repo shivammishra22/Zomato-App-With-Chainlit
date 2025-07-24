@@ -1,148 +1,80 @@
 import pandas as pd
-import json
-import subprocess
-import numpy as np
-import torch
-from sentence_transformers import SentenceTransformer, util
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.chat_models import ChatOllama
 
-# === Step 1: Load Data ===
-csv_path = r"C:\Users\shivam.mishra2\Downloads\literature_data.csv"
-df = pd.read_csv(csv_path)
 
-# === Step 2: Print Missing Abstracts Only ===
-missing_abstracts = df[df['Abstract'].isnull() | df['Abstract'].str.strip().eq("")]
-print("\n=== Missing Abstracts (PMID, Title) ===")
-print(missing_abstracts[['PMID', 'Title']])
 
-# Drop rows with missing abstracts
-df = df.dropna(subset=["Abstract"])
-df = df[df["Abstract"].str.strip() != ""]
+# Ask the user for the indication
+indication = input("Enter the therapeutic indication to evaluate against the abstract: ")
 
-# === Step 3: Load Embedding Model ===
-print("🔄 Encoding abstracts...")
-model = SentenceTransformer("all-MiniLM-L6-v2")
-abstract_texts = df["Abstract"].tolist()
-abstract_embeddings = model.encode(abstract_texts, convert_to_tensor=True)
+# Define the prompt template
+template = ChatPromptTemplate.from_messages([
+    ("system", 
+     """You are a pharmacovigilance expert generating the PSUR sub-section titled “Characterisation of Benefits”.
 
-# === Step 4: Semantic Search Setup ===
-inclusive_query = """
-Suspected adverse reactions in humans; pregnancy, pediatrics, overdose, misuse,
-lack of efficacy, quality defects, falsified medicines, infectious transmission, ICSR, etc.
-"""
+Evaluate the abstract based on the following criteria:
+1) Strength of evidence: comparator(s), effect size, statistical significance, consistency, methodology.
+2) Clinical relevance of effect size.
+3) Generalisability to full indicated population (e.g., any sub-population not showing benefit).
+4) Dose-response characterisation.
+5) Duration of effect.
+6) Comparative efficacy.
 
-inclusive_keywords = [
-    "adverse reaction", "ICSR", "overdose", "lack of efficacy", "pregnancy", "elderly",
-    "misuse", "medication error", "paediatrics", "falsified", "infectious"
-]
+Also:
+- Verify whether the abstract supports the following therapeutic indication: "{Indication}"
+- Identify any other indications mentioned in the abstract that differ from the one provided.
 
-query_embedding = model.encode(inclusive_query, convert_to_tensor=True)
-keyword_embeddings = model.encode(inclusive_keywords, convert_to_tensor=True)
+Respond in the following format:
+Relevance: Relevant or Not Relevant
+Indication Match: Yes or No
+Other Indications: [List of other indications or 'None']
+"""),
+    ("user", "{Abstract}")
+])
 
-similarity_threshold = 0.5  # You can adjust this
+# Initialize the language model
+llm = ChatOllama(model='gemma3:4b', temperature=0.1, num_ctx=1000)
 
-# === Step 5: Ollama Functions ===
-def classify_with_ollama(abstract):
-    prompt = f"""
-Classify the abstract as INCLUSION or EXCLUSION based on these criteria:
+# Create the pipeline
+chain = template | llm
 
-INCLUSION:
-• Suspected adverse reactions in humans.
-• Specific situations: pregnancy, overdose, misuse, elderly, pediatric, etc.
-• Lack of efficacy, falsified drugs, quality issues, etc.
-• Clinical trial results (non-company).
-• Aggregated data with potential for ICSR.
+# Process each abstract
+relevance_results = []
+indication_results = []
+other_indications_results = []
 
-EXCLUSION:
-• No adverse event with company product.
-• Preclinical/animal/in-vitro studies.
-• No/negative causality.
-• Non-company suspect product.
+for abstract in df['Abstract']:
+    result = chain.invoke({
+        'Abstract': abstract,
+        'Indication': indication
+    }).content.strip()
 
-Abstract:
-{abstract}
+    # Default values
+    relevance = "Not Available"
+    indication_match = "Not Available"
+    other_indications = "NaN"
 
-Answer in one word only: INCLUSION or EXCLUSION
-"""
-    try:
-        result = subprocess.run(
-            ["ollama", "run", "llama3", prompt],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return result.stdout.strip().upper()
-    except subprocess.CalledProcessError as e:
-        print("❌ Classification error:", e.stderr)
-        return "UNKNOWN"
+    # Parse the result
+    for line in result.splitlines():
+        if "Relevance:" in line:
+            relevance = line.split(":", 1)[1].strip()
+            if relevance.lower() == "irrelevant":
+                relevance = "Not Relevant"
+        elif "Indication Match:" in line:
+            indication_match = line.split(":", 1)[1].strip()
+        elif "Other Indications:" in line:
+            other_indications = line.split(":", 1)[1].strip()
+            if other_indications.lower() in ["none", "n/a", "not applicable"]:
+                other_indications = "NaN"
 
-def summarize_with_ollama(abstract, abstract_type):
-    prompt = f"""
-You are a medical reviewer. Provide a concise summary of this {abstract_type} abstract.
-Highlight adverse reactions, population groups, study type, and significance.
+    relevance_results.append(relevance)
+    indication_results.append(indication_match)
+    other_indications_results.append(other_indications)
 
-Abstract:
-{abstract}
-"""
-    try:
-        result = subprocess.run(
-            ["ollama", "run", "llama3", prompt],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        print("❌ Summary error:", e.stderr)
-        return ""
-
-# === Step 6: Process Abstracts Based on Similarity and Classify ===
-inclusive_abstracts = []
-exclusive_abstracts = []
-inclusive_summaries = []
-exclusive_summaries = []
-
-print("\n🔍 Running Semantic Search and Classification...")
-for i, row in enumerate(df.itertuples(index=False)):
-    pmid = row.PMID
-    title = row.Title
-    abstract = row.Abstract
-    emb = abstract_embeddings[i]
-
-    sim_query = util.cos_sim(emb, query_embedding).item()
-    sim_keywords = util.cos_sim(emb, keyword_embeddings).squeeze()
-    max_sim_keyword = torch.max(sim_keywords).item()
-
-    if sim_query >= similarity_threshold or max_sim_keyword >= similarity_threshold:
-        decision = classify_with_ollama(abstract)
-        record = {"PMID": pmid, "Title": title, "Abstract": abstract}
-
-        if decision == "INCLUSION":
-            inclusive_abstracts.append(record)
-            summary = summarize_with_ollama(abstract, "INCLUSIVE")
-            inclusive_summaries.append((pmid, title, summary))
-        elif decision == "EXCLUSION":
-            exclusive_abstracts.append(record)
-            summary = summarize_with_ollama(abstract, "EXCLUSIVE")
-            exclusive_summaries.append((pmid, title, summary))
-        else:
-            print(f"⚠️ UNKNOWN classification for PMID: {pmid}")
-    else:
-        print(f"⏭️ Skipped PMID {pmid} (similarity too low: {max(sim_query, max_sim_keyword):.2f})")
-
-# === Step 7: Save JSON Results ===
-with open("inclusive_abstracts.json", "w", encoding="utf-8") as f:
-    json.dump(inclusive_abstracts, f, indent=2, ensure_ascii=False)
-
-with open("exclusive_abstracts.json", "w", encoding="utf-8") as f:
-    json.dump(exclusive_abstracts, f, indent=2, ensure_ascii=False)
-
-# === Step 8: Save Summary Files ===
-with open("inclusive_summary_with_pmid.txt", "w", encoding="utf-8") as f:
-    for pmid, title, summary in inclusive_summaries:
-        f.write(f"PMID: {pmid}\nTitle: {title}\nSummary: {summary}\n\n{'='*100}\n\n")
-
-with open("exclusive_summary_with_pmid.txt", "w", encoding="utf-8") as f:
-    for pmid, title, summary in exclusive_summaries:
-        f.write(f"PMID: {pmid}\nTitle: {title}\nSummary: {summary}\n\n{'='*100}\n\n")
-
-print("\n✅ DONE: Embedding → Similarity Search → Classification → Summary Saved.")
+# Add results to DataFrame
+df['Relevance'] = relevance_results
+df['Indication Match'] = indication_results
+df['Other Indications'] = other_indications_results
+df.to_csv("hello.csv")
+# Output the result
+print(df)
