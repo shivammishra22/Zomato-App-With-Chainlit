@@ -1,80 +1,82 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import pandas as pd
+import re
+from tqdm.auto import tqdm
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.chat_models import ChatOllama
 
+# --- 1. Load your data ---
+# Replace "input.csv" with your actual file
+df = pd.read_csv("input.csv", dtype=str)
 
+# --- 2. Get the indication from the user ---
+indication = input("Enter the therapeutic indication to evaluate against the abstracts: ").strip()
 
-# Ask the user for the indication
-indication = input("Enter the therapeutic indication to evaluate against the abstract: ")
-
-# Define the prompt template
+# --- 3. Build the prompt template ---
 template = ChatPromptTemplate.from_messages([
-    ("system", 
-     """You are a pharmacovigilance expert generating the PSUR sub-section titled “Characterisation of Benefits”.
+    ("system", """You are a pharmacovigilance expert generating the PSUR sub‑section titled “Characterisation of Benefits”.
 
-Evaluate the abstract based on the following criteria:
-1) Strength of evidence: comparator(s), effect size, statistical significance, consistency, methodology.
-2) Clinical relevance of effect size.
-3) Generalisability to full indicated population (e.g., any sub-population not showing benefit).
-4) Dose-response characterisation.
-5) Duration of effect.
-6) Comparative efficacy.
+Evaluate each abstract based on:
+1) Strength of evidence (comparators, effect size, stats, consistency, methodology)  
+2) Clinical relevance of effect size  
+3) Generalisability  
+4) Dose‑response  
+5) Duration of effect  
+6) Comparative efficacy
 
 Also:
-- Verify whether the abstract supports the following therapeutic indication: "{Indication}"
-- Identify any other indications mentioned in the abstract that differ from the one provided.
+- Does the abstract support the indication: "{Indication}"?  
+- List any *other* indications mentioned.
 
-Respond in the following format:
-Relevance: Relevant or Not Relevant
-Indication Match: Yes or No
-Other Indications: [List of other indications or 'None']
-"""),
+Respond exactly in this format (one value per line):
+Relevance: Relevant or Not Relevant  
+Indication Match: Yes or No  
+Other Indications: [comma‑separated list or 'None']"""),
     ("user", "{Abstract}")
 ])
 
-# Initialize the language model
-llm = ChatOllama(model='gemma3:4b', temperature=0.1, num_ctx=1000)
-
-# Create the pipeline
+# --- 4. Initialize the model & chain ---
+llm = ChatOllama(model="gemma3:4b", temperature=0.1, num_ctx=1000)
 chain = template | llm
 
-# Process each abstract
-relevance_results = []
-indication_results = []
-other_indications_results = []
+# --- 5. Prepare regexes for parsing ---
+pat_rel = re.compile(r"^Relevance:\s*(Relevant|Not\s+Relevant)", re.IGNORECASE)
+pat_match = re.compile(r"^Indication\s+Match:\s*(Yes|No)", re.IGNORECASE)
+pat_other = re.compile(r"^Other\s+Indications:\s*(.*)", re.IGNORECASE)
 
-for abstract in df['Abstract']:
-    result = chain.invoke({
-        'Abstract': abstract,
-        'Indication': indication
-    }).content.strip()
+# --- 6. Run through abstracts with tqdm ---
+results = []
+for abstract in tqdm(df["Abstract"], desc="Evaluating abstracts"):
+    resp = chain.invoke({"Abstract": abstract, "Indication": indication}).content.strip()
+    
+    # default fallbacks
+    rel = "Not Available"
+    m   = "Not Available"
+    oth = ""
 
-    # Default values
-    relevance = "Not Available"
-    indication_match = "Not Available"
-    other_indications = "NaN"
+    for line in resp.splitlines():
+        if m_rel := pat_rel.match(line):
+            rel = m_rel.group(1)
+        elif m_match := pat_match.match(line):
+            m = m_match.group(1)
+        elif m_other := pat_other.match(line):
+            oth = m_other.group(1).strip()
+            if oth.lower() in ("none", "n/a", "not applicable", ""):
+                oth = ""
 
-    # Parse the result
-    for line in result.splitlines():
-        if "Relevance:" in line:
-            relevance = line.split(":", 1)[1].strip()
-            if relevance.lower() == "irrelevant":
-                relevance = "Not Relevant"
-        elif "Indication Match:" in line:
-            indication_match = line.split(":", 1)[1].strip()
-        elif "Other Indications:" in line:
-            other_indications = line.split(":", 1)[1].strip()
-            if other_indications.lower() in ["none", "n/a", "not applicable"]:
-                other_indications = "NaN"
+    results.append((rel, m, oth))
 
-    relevance_results.append(relevance)
-    indication_results.append(indication_match)
-    other_indications_results.append(other_indications)
+# --- 7. Assemble the output DataFrame ---
+out_df = df[["PMID", "Title", "Abstract", "Publication_Year"]].copy()
+out_df[["Relevance", "Indication Match", "Other Indications"]] = pd.DataFrame(
+    results, index=out_df.index
+)
 
-# Add results to DataFrame
-df['Relevance'] = relevance_results
-df['Indication Match'] = indication_results
-df['Other Indications'] = other_indications_results
-df.to_csv("hello.csv")
-# Output the result
-print(df)
+# --- 8. Save a clean CSV ---
+out_file = "results.csv"
+out_df.to_csv(out_file, index=False)
+
+print(f"\n✅ Done! Results saved to '{out_file}'\n")
+print(out_df.head(10).to_markdown(index=False))
