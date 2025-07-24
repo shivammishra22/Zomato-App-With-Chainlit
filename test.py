@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+#{drug_name}" AND (drug therapy[mh] OR efficacy or therapeutic use[mh] OR treatment outcome[mh]) AND (efficacy[tiab] OR effectiveness[tiab] OR clinical benefit[tiab] OR Symptom relief OR Risk scores ) AND humans[mesh]'
 
 import pandas as pd
 import re
