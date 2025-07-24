@@ -2,6 +2,15 @@
 # -*- coding: utf-8 -*-
 #{drug_name}" AND (drug therapy[mh] OR efficacy or therapeutic use[mh] OR treatment outcome[mh]) AND (efficacy[tiab] OR effectiveness[tiab] OR clinical benefit[tiab] OR Symptom relief OR Risk scores ) AND humans[mesh]'
 
+'''
+Authorized Indications
+•The management of the manifestations of schizophrenia/ psychotic disorders. 
+•Treatment of an acute episodes of moderate to severe mania and preventing the recurrence of 
+mania or depressive episodes in bipolar disorder.
+
+'''
+
+
 import pandas as pd
 import re
 from tqdm.auto import tqdm
