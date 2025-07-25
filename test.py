@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-#{drug_name}" AND (drug therapy[mh] OR efficacy or therapeutic use[mh] OR treatment outcome[mh]) AND (efficacy[tiab] OR effectiveness[tiab] OR clinical benefit[tiab] OR Symptom relief OR Risk scores ) AND humans[mesh]'
-
-'''
-Authorized Indications
-•The management of the manifestations of schizophrenia/ psychotic disorders. 
-•Treatment of an acute episodes of moderate to severe mania and preventing the recurrence of 
-mania or depressive episodes in bipolar disorder.
-
-'''
-
 
 import pandas as pd
 import re
@@ -17,85 +7,97 @@ from tqdm.auto import tqdm
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.chat_models import ChatOllama
 
- # Ensure this file exists in your working directory
+# --- 1. Load CSV ---
+df = pd.read_csv("input.csv", dtype=str)
 
-# --- 2. Get the indication from the user ---
+# --- 2. Check required columns ---
+required_cols = {"PMID", "Title", "Abstract", "Authors", "Publication_Date"}
+missing_cols = required_cols - set(df.columns)
+if missing_cols:
+    raise ValueError(f"❌ Missing columns in input file: {', '.join(missing_cols)}")
+
+# --- 3. Get indication from user ---
 indication = input("Enter the therapeutic indication to evaluate against the abstracts: ").strip().lower()
 
-# --- 3. Build the prompt template with reason request ---
-template = ChatPromptTemplate.from_messages([
-    ("system", f"""/set nothink
-You are a pharmacovigilance expert generating the PSUR sub‑section titled “Characterisation of Benefits”.
+# --- 4. Unified Prompt ---
+unified_prompt = ChatPromptTemplate.from_messages([
+    ("system", f"""You are a pharmacovigilance expert preparing the “Characterisation of Benefits” section of a PSUR.
 
-For each abstract, evaluate:
-1) Strength of evidence (comparators, effect size, stats, consistency, methodology)  
-2) Clinical relevance of effect size  
-3) Generalisability  
-4) Dose‑response  
-5) Duration of effect  
-6) Comparative efficacy
+Your task is to:
+1. Evaluate the abstract for benefit characteristics such as:
+   - Strength of evidence (comparators, effect size, statistics, methodology)
+   - Clinical relevance of the effect size
+   - Generalisability
+   - Dose–response
+   - Duration and consistency
+   - Comparative efficacy
 
-Also:
-- Does the abstract support the indication: "{indication}"? Provide “Yes” or “No” **and** a brief reason for your choice.
-- List any *other* proven benefits or indications mentioned in the abstract that are **different** from "{indication}". If none, write "None".
+2. Determine if it provides evidence for the therapeutic indication: "{indication}"
 
-Respond exactly in this format (one value per line):
+Respond **only in the following format**:
+
 Relevance: Relevant or Not Relevant  
+Reason: <brief reason for benefit evaluation>  
 Indication Match: Yes or No  
-Reason: [brief explanation]  
-Other Indications: [comma‑separated list or 'None']"""),
+Indication Reason: <brief justification regarding indication match or mismatch>"""),
     ("user", "{Abstract}")
-])
+]).partial(indication=indication)
 
-# --- 4. Initialize the model & chain ---
-llm = ChatOllama(model="qwen3:4b", temperature=0.1, num_ctx=1000)
-chain = template | llm
+# --- 5. Initialize Ollama LLM ---
+llm = ChatOllama(model="gemma3", temperature=0.1, num_ctx=1000)
+chain = unified_prompt | llm
 
-# --- 5. Prepare regexes for parsing ---
-pat_rel    = re.compile(r"^Relevance:\s*(Relevant|Not\s+Relevant)", re.IGNORECASE)
-pat_match  = re.compile(r"^Indication\s+Match:\s*(Yes|No)", re.IGNORECASE)
-pat_reason = re.compile(r"^Reason:\s*(.+)", re.IGNORECASE)
-pat_other  = re.compile(r"^Other\s+Indications:\s*(.*)", re.IGNORECASE)
+# --- 6. Evaluation Loop ---
+rel_benefit_list = []
+res_benefit_list = []
+ind_match_list = []
+ind_reason_list = []
 
-# --- 6. Run through abstracts with tqdm ---
-results = []
-for abstract in tqdm(df["Abstract"], desc="Evaluating abstracts"):
-    resp = chain.invoke({"Abstract": abstract, "Indication": indication}).content.strip()
+for _, row in tqdm(df.iterrows(), total=len(df), desc="Evaluating abstracts"):
+    abstract = row.get("Abstract", "")
+    if not isinstance(abstract, str) or not abstract.strip():
+        rel_benefit_list.append("Not Available")
+        res_benefit_list.append("Abstract is empty or missing")
+        ind_match_list.append("Not Available")
+        ind_reason_list.append("Abstract is empty or missing")
+        continue
 
-    # default fallbacks
-    rel    = "Not Available"
-    match  = "Not Available"
-    reason = ""
-    other  = "None"
+    # --- Unified LLM Call ---
+    response = chain.invoke({"Abstract": abstract})
+    result_text = response.content if hasattr(response, "content") else str(response)
 
-    for line in resp.splitlines():
-        if m := pat_rel.match(line):
-            rel = m.group(1)
-        elif m := pat_match.match(line):
-            match = m.group(1)
-        elif m := pat_reason.match(line):
-            reason = m.group(1).strip()
-        elif m := pat_other.match(line):
-            other_raw = m.group(1).strip()
-            if other_raw.lower() in ("none", "n/a", "not applicable", ""):
-                other = "None"
-            else:
-                # Filter out the user-provided indication if it appears in other indications
-                other_list = [ind.strip() for ind in other_raw.split(",")]
-                filtered = [ind for ind in other_list if ind.lower() != indication]
-                other = ", ".join(filtered) if filtered else "None"
+    # --- Parse LLM Response ---
+    match_rel = re.search(r"Relevance:\s*(Relevant|Not Relevant)", result_text, re.IGNORECASE)
+    match_reason = re.search(r"Reason:\s*(.+)", result_text, re.IGNORECASE)
+    match_ind = re.search(r"Indication Match:\s*(Yes|No)", result_text, re.IGNORECASE)
+    match_ind_reason = re.search(r"Indication Reason:\s*(.+)", result_text, re.IGNORECASE)
 
-    results.append((rel, match, reason, other))
+    rel_benefit_list.append(match_rel.group(1).strip() if match_rel else "Unclear")
+    res_benefit_list.append(match_reason.group(1).strip() if match_reason else "Could not extract reason")
+    ind_match_list.append(match_ind.group(1).strip() if match_ind else "Unclear")
+    ind_reason_list.append(match_ind_reason.group(1).strip() if match_ind_reason else "Could not extract indication reason")
 
-# --- 7. Assemble the output DataFrame ---
-out_df = df[["PMID", "Title", "Abstract", "Publication_Year"]].copy()
-out_df[["Relevance", "Indication Match", "Reason", "Other Indications"]] = pd.DataFrame(
-    results, index=out_df.index
-)
+# --- 7. Assign Output Columns ---
+df["Relavance_benifit"] = rel_benefit_list
+df["Reson_Benifit"] = res_benefit_list
+df["Indication Match"] = ind_match_list
+df["Indication Reason"] = ind_reason_list
 
-# --- 8. Save a clean CSV ---
-out_file = "hello.csv"
-out_df.to_csv(out_file, index=False)
+# --- 8. Select Final Columns ---
+final_columns = [
+    "PMID",
+    "Title",
+    "Abstract",
+    "Authors",
+    "Publication_Date",
+    "Relavance_benifit",
+    "Reson_Benifit",
+    "Indication Match",
+    "Indication Reason"
+]
+df_final = df[final_columns]
 
-print(f"\n✅ Done! Results saved to '{out_file}'\n")
-print(out_df.head(10).to_markdown(index=False))
+# --- 9. Export to CSV ---
+output_path = "psur_evaluation_output.csv"
+df_final.to_csv(output_path, index=False)
+print(f"✅ Evaluation complete. Output saved to '{output_path}'")
