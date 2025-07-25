@@ -34,12 +34,15 @@ Your task is to:
 
 2. Determine if it provides evidence for the therapeutic indication: "{indication}"
 
+3. Also, identify if any other therapeutic indications are mentioned in the abstract apart from the primary indication "{indication}". If other indications are found, list them.
+
 Respond **only in the following format**:
 
 Relevance: Relevant or Not Relevant  
 Reason: <brief reason for benefit evaluation>  
 Indication Match: Yes or No  
-Indication Reason: <brief justification regarding indication match or mismatch>"""),
+Indication Reason: <brief justification regarding indication match or mismatch>  
+Other Indications: <list of other indications or 'None'>"""),
     ("user", "{Abstract}")
 ]).partial(indication=indication)
 
@@ -52,6 +55,7 @@ rel_benefit_list = []
 res_benefit_list = []
 ind_match_list = []
 ind_reason_list = []
+other_indications_list = []
 
 for _, row in tqdm(df.iterrows(), total=len(df), desc="Evaluating abstracts"):
     abstract = row.get("Abstract", "")
@@ -60,6 +64,7 @@ for _, row in tqdm(df.iterrows(), total=len(df), desc="Evaluating abstracts"):
         res_benefit_list.append("Abstract is empty or missing")
         ind_match_list.append("Not Available")
         ind_reason_list.append("Abstract is empty or missing")
+        other_indications_list.append("Not Available")
         continue
 
     # --- Unified LLM Call ---
@@ -71,17 +76,21 @@ for _, row in tqdm(df.iterrows(), total=len(df), desc="Evaluating abstracts"):
     match_reason = re.search(r"Reason:\s*(.+)", result_text, re.IGNORECASE)
     match_ind = re.search(r"Indication Match:\s*(Yes|No)", result_text, re.IGNORECASE)
     match_ind_reason = re.search(r"Indication Reason:\s*(.+)", result_text, re.IGNORECASE)
+    match_other_ind = re.search(r"Other Indications:\s*(.+)", result_text, re.IGNORECASE)
 
+    # Store results
     rel_benefit_list.append(match_rel.group(1).strip() if match_rel else "Unclear")
     res_benefit_list.append(match_reason.group(1).strip() if match_reason else "Could not extract reason")
     ind_match_list.append(match_ind.group(1).strip() if match_ind else "Unclear")
     ind_reason_list.append(match_ind_reason.group(1).strip() if match_ind_reason else "Could not extract indication reason")
+    other_indications_list.append(match_other_ind.group(1).strip() if match_other_ind else "None")
 
 # --- 7. Assign Output Columns ---
 df["Relavance_benifit"] = rel_benefit_list
 df["Reson_Benifit"] = res_benefit_list
 df["Indication Match"] = ind_match_list
 df["Indication Reason"] = ind_reason_list
+df["Other Indications"] = other_indications_list
 
 # --- 8. Select Final Columns ---
 final_columns = [
@@ -93,7 +102,8 @@ final_columns = [
     "Relavance_benifit",
     "Reson_Benifit",
     "Indication Match",
-    "Indication Reason"
+    "Indication Reason",
+    "Other Indications"
 ]
 df_final = df[final_columns]
 
