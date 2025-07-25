@@ -1,105 +1,118 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import pandas as pd
-import numpy as np
-from langchain_community.document_loaders.csv_loader import CSVLoader
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain_community.llms import Ollama
-from langchain_community.vectorstores import FAISS
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain_core.documents import Document
-from tqdm import tqdm
+import re
+from tqdm.auto import tqdm
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.chat_models import ChatOllama
 
-# === Step 1: Load CSV ===
-loader = CSVLoader(
-    file_path=r"C:\Users\assis\Downloads\Pubmed_cleaned_csv.csv",
-    encoding="utf-8",
-    source_column="Abstract",
-    metadata_columns=["PMID", "Title"],
-    csv_args={"delimiter": ",", "quotechar": '"', "skipinitialspace": True}
-)
-docs = loader.load()
 
-# === Step 2: Initialize Embedding Model ===
-embedding_model = OllamaEmbeddings(model="mxbai-embed-large")
+# Ensure required columns exist
+required_cols = {"PMID", "Title", "Abstract", "Authors", "Publication_Date"}
+missing_cols = required_cols - set(df.columns)
+if missing_cols:
+    raise ValueError(f"❌ Missing columns in input file: {', '.join(missing_cols)}")
 
-# === Step 3: Build FAISS Vector Store ===
-db = FAISS.from_documents(docs, embedding_model)
+# --- 2. Get Therapeutic Indication from User ---
+indication = input("Enter the therapeutic indication to evaluate against the abstracts: ").strip().lower()
 
-# === Step 4: Define Evaluation Prompt and Chain ===
-eval_prompt = PromptTemplate.from_template(
-    """
-You are a pharmacovigilance expert. Evaluate the abstract below and answer:
-"Does this abstract provide information relevant to the 'Characterisation of Benefit Data' section of a PSUR based on the criteria listed?"
+# --- 3. Define Prompt 1: Benefit Evaluation ---
+benefit_prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are a pharmacovigilance expert preparing the “Characterisation of Benefits” section for a PSUR.
 
-Return only "Yes" or "No".
+Evaluate the abstract based on:
+1. Strength of evidence (comparators, effect size, statistics, methodology)
+2. Clinical relevance of the effect size
+3. Generalisability of the results to wider populations
+4. Presence of a dose–response relationship
+5. Duration and consistency of observed effects
+6. Comparative efficacy with existing therapies
 
-Criteria: dose-response, duration, comparative efficacy, strengths/limitations, effect size, rigor, relevance.
+Then respond in the following format:
+Relevance: Relevant or Not Relevant  
+Reason: <Short reason>"""),
+    ("user", "{Abstract}")
+])
 
-Abstract:
-{abstract}
-"""
-)
-llm = Ollama(model="llama3")
-eval_chain = LLMChain(llm=llm, prompt=eval_prompt)
+# --- 4. Define Prompt 2: Indication Matching ---
+indication_prompt = ChatPromptTemplate.from_messages([
+    ("system", """You are evaluating whether the given abstract supports the therapeutic indication: "{indication}".
 
-# === Step 5: Evaluate Abstracts and Add Scores ===
-results = []
-for doc in tqdm(docs, desc="Evaluating abstracts..."):
-    abstract = doc.page_content.strip()
-    meta = doc.metadata
-    if not abstract:
+Check if the abstract explicitly or implicitly provides evidence related to this indication, regardless of strength.
+
+Respond only in the following format:
+Indication Match: Yes or No  
+Indication Reason: <Short reason>"""),
+    ("user", "{Abstract}")
+])
+
+# --- 5. Initialize Local LLM ---
+llm = ChatOllama(model="gemma3", temperature=0.1, num_ctx=1000)
+benefit_chain = benefit_prompt | llm
+indication_chain = indication_prompt.partial(indication=indication) | llm
+
+# --- 6. Evaluation Loop ---
+rel_benefit_list = []
+res_benefit_list = []
+ind_match_list = []
+ind_reason_list = []
+
+for _, row in tqdm(df.iterrows(), total=len(df), desc="Evaluating abstracts"):
+    abstract = row.get("Abstract", "")
+    if not isinstance(abstract, str) or not abstract.strip():
+        rel_benefit_list.append("Not Available")
+        res_benefit_list.append("Abstract is empty or missing")
+        ind_match_list.append("Not Available")
+        ind_reason_list.append("Abstract is empty or missing")
         continue
-    resp = eval_chain.run({"abstract": abstract}).strip()
-    if "yes" in resp.lower():
-        decision, score = "Yes", 1
-    elif "no" in resp.lower():
-        decision, score = "No", 0
-    else:
-        decision, score = "Unclear", np.nan
-    results.append({
-        "PMID": meta.get("PMID", ""),
-        "Title": meta.get("Title", ""),
-        "Abstract": abstract,
-        "LLM_Evaluation": decision,
-        "Score": score
-    })
 
-# === Step 6: Create DataFrame and Save ===
-df_result = pd.DataFrame(results)
-df_result.to_csv("psur_abstract_evaluation_with_scores.csv", index=False)
+    # --- Benefit Evaluation ---
+    benefit_resp = benefit_chain.invoke({"Abstract": abstract})
+    benefit_text = benefit_resp.content if hasattr(benefit_resp, "content") else str(benefit_resp)
 
-# === Step 7: Define Drug-Detection Prompt and Chain ===
-drug_prompt = PromptTemplate.from_template(
-    """
-You are a pharmacovigilance expert. Does the following abstract discuss *only* the drug sacubitril/valsartan? Return "Yes" or "No".
+    match_rel = re.search(r"Relevance:\s*(Relevant|Not Relevant)", benefit_text, re.IGNORECASE)
+    match_reason = re.search(r"Reason:\s*(.+)", benefit_text, re.IGNORECASE)
 
-Abstract:
-{abstract}
-"""
-)
-drug_chain = LLMChain(llm=llm, prompt=drug_prompt)
+    relevance = match_rel.group(1).strip() if match_rel else "Unclear"
+    reason = match_reason.group(1).strip() if match_reason else "Could not extract reason"
 
-# === Step 8: Filter Abstracts via LLM Response ===
-filtered = []
-for doc in tqdm(docs, desc="Filtering for sacubitril/valsartan abstracts..."):
-    abstract = doc.page_content.strip()
-    if not abstract:
-        continue
-    resp = drug_chain.run({"abstract": abstract}).strip()
-    if "yes" in resp.lower():
-        filtered.append({
-            "PMID": doc.metadata.get("PMID", ""),
-            "Title": doc.metadata.get("Title", ""),
-            "Abstract": abstract,
-            "LLM_Evaluation": df_result.loc[df_result["PMID"] == doc.metadata.get("PMID"), "LLM_Evaluation"].values[0],
-            "Score": df_result.loc[df_result["PMID"] == doc.metadata.get("PMID"), "Score"].values[0]
-        })
-# === Step 9: Create Filtered DataFrame and Save ===
-df_filtered = pd.DataFrame(filtered)
-df_filtered.to_csv("filtered_abstracts_sacubitril_valsartan_llm.csv", index=False)
+    rel_benefit_list.append(relevance)
+    res_benefit_list.append(reason)
 
-# === Step 10: Display to User ===
-from ace_tools import display_dataframe_to_user
+    # --- Indication Matching ---
+    indication_resp = indication_chain.invoke({"Abstract": abstract})
+    indication_text = indication_resp.content if hasattr(indication_resp, "content") else str(indication_resp)
 
-display_dataframe_to_user("PSUR Abstracts with Scores", df_result)
-display_dataframe_to_user("Sacubitril/Valsartan Abstracts", df_filtered)
+    match_ind = re.search(r"Indication Match:\s*(Yes|No)", indication_text, re.IGNORECASE)
+    match_ind_reason = re.search(r"Indication Reason:\s*(.+)", indication_text, re.IGNORECASE)
+
+    ind_match = match_ind.group(1).strip() if match_ind else "Unclear"
+    ind_reason = match_ind_reason.group(1).strip() if match_ind_reason else "Could not extract indication reason"
+
+    ind_match_list.append(ind_match)
+    ind_reason_list.append(ind_reason)
+
+# --- 7. Assign Results to DataFrame ---
+df["Relavance_benifit"] = rel_benefit_list
+df["Reson_Benifit"] = res_benefit_list
+df["Indication Match"] = ind_match_list
+df["Indication Reason"] = ind_reason_list
+
+# --- 8. Select Final Columns and Export ---
+final_columns = [
+    "PMID",
+    "Title",
+    "Abstract",
+    "Authors",
+    "Publication_Date",
+    "Relavance_benifit",
+    "Reson_Benifit",
+    "Indication Match",
+    "Indication Reason"
+]
+df_final = df[final_columns]
+
+output_path = "psur_evaluation_output.csv"
+df_final.to_csv(output_path, index=False)
+print(f"✅ Evaluation complete. Output saved to '{output_path}'")
