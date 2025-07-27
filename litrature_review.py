@@ -1,117 +1,89 @@
-# part1_build_and_save_faiss.py
-
+import streamlit as st
 import pandas as pd
-import numpy as np
-import faiss
-from sentence_transformers import SentenceTransformer
+from langchain_ollama import ChatOllama
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain.document_loaders import DataFrameLoader
+from langchain.vectorstores import FAISS
+import time
 
-# === Step 1: Load Data ===
-df = pd.read_csv("your_file.csv")  # Change to your real path
-df = df[["PMID", "Title", "Abstract"]].dropna(subset=["Abstract"]).reset_index(drop=True)
+# --- Streamlit UI ---
+st.title("🧠 Medical Abstract Summarizer & Semantic Search")
+uploaded_file = st.file_uploader("📄 Upload CSV file with abstracts", type=["csv"])
+query = st.text_input("🔍 Enter your query (e.g., treatment of schizophrenia using olanzapine):")
+run_button = st.button("Run")
 
-# === Step 2: Load Local Embedding Model ===
-model = SentenceTransformer("all-MiniLM-L6-v2")
+# --- Define Model and Prompt Once ---
+@st.cache_resource
+def load_model():
+    return ChatOllama(model="qwen3:0.6b", reasoning=False, temperature=0.1, max_tokens=500, num_ctx=2048)
 
-# === Step 3: Generate Embeddings ===
-embeddings = model.encode(df["Abstract"].tolist(), show_progress_bar=True)
-embedding_matrix = np.array(embeddings).astype("float32")
+@st.cache_resource
+def load_prompt():
+    return ChatPromptTemplate.from_messages([
+        ("system", "You are a helpful assistant that summarizes medical abstracts. Just provide a concise summary that captures the main points of the abstract. Don't include any additional information or context."),
+        ("human", "Summarize the following abstract: {abstract}")
+    ])
 
-# === Step 4: Create and Save FAISS Index ===
-index = faiss.IndexFlatL2(embedding_matrix.shape[1])
-index.add(embedding_matrix)
-faiss.write_index(index, "faiss_index.bin")  # Save index
+@st.cache_resource
+def get_embedding_model():
+    return HuggingFaceEmbeddings(model_name='NeuML/pubmedbert-base-embeddings')
 
-# === Step 5: Save Metadata (PMID, Title, Abstract) ===
-df.to_pickle("metadata.pkl")
-#################################################
+# --- Main Logic ---
+if run_button and uploaded_file and query:
+    try:
+        df = pd.read_csv(uploaded_file)
+        if 'Abstract' not in df.columns:
+            st.error("❌ 'Abstract' column not found in the uploaded CSV.")
+            st.stop()
 
+        df.dropna(subset=['Abstract'], inplace=True)
+        df['Abstract_Summary_Qwen'] = ''
 
-# part2_load_and_classify_with_ollama.py
+        model = load_model()
+        prompt = load_prompt()
 
-import pandas as pd
-import numpy as np
-import faiss
-from sentence_transformers import SentenceTransformer
-import subprocess
+        st.info("⏳ Summarizing abstracts...")
+        progress_bar = st.progress(0)
+        for i, (idx, row) in enumerate(df.iterrows()):
+            abstract = row['Abstract']
+            if pd.notna(abstract) and abstract.strip() and abstract != 'N/A':
+                try:
+                    summary = model.invoke(prompt.invoke({"abstract": abstract}))
+                    df.at[idx, 'Abstract_Summary_Qwen'] = summary.content
+                except Exception as e:
+                    df.at[idx, 'Abstract_Summary_Qwen'] = f"Error: {str(e)[:100]}"
+            else:
+                df.at[idx, 'Abstract_Summary_Qwen'] = "No abstract available"
+            progress_bar.progress((i + 1) / len(df))
 
-# === PROMPTS ===
-INCLUSION_PROMPT = """
-Check if the abstract discusses one or more of the following:
-1. Suspected adverse reactions in humans, including those from published abstracts, solicited reports, or manuscripts.
-2. Specific situations like pregnancy, paediatrics, elderly, off-label use, overdose, medication error, or misuse.
-3. Adverse reactions due to product quality, falsified medicine, or transmission of infection.
-4. Lack of therapeutic efficacy.
-5. Review of non-company-sponsored clinical trial outcomes.
-6. Aggregated adverse reaction data that could become a valid ICSR.
-If any of these are present, classify it as INCLUSION.
-"""
+        st.success("✅ Summarization completed.")
+        df_display = df[["PMID", "Title", "Abstract_Summary_Qwen"]]
+        st.dataframe(df_display.head(10))
 
-EXCLUSION_PROMPT = """
-Classify the abstract as EXCLUSION if:
-1. No adverse event (AE) with company suspect product is discussed.
-2. It refers only to animal/preclinical/in-vitro/ex-vivo studies.
-3. There’s no or negative causality with company suspect product.
-4. Suspect product is from a non-company (different MAH).
-5. No identifiable ICSR or medical relevance.
-"""
+        st.info("🔎 Performing semantic search...")
 
-FULL_PROMPT_TEMPLATE = f"""{INCLUSION_PROMPT}\n{EXCLUSION_PROMPT}
-Now read the abstract below and respond only with the word INCLUSION or EXCLUSION.\nAbstract:\n{{abstract}}
-"""
+        # Prepare documents and FAISS index
+        df_for_search = df[["PMID", "Title", "Abstract_Summary_Qwen"]].copy()
+        loader = DataFrameLoader(df_for_search, page_content_column="Abstract_Summary_Qwen")
+        docs = loader.load()
 
-# === Step 1: Load Metadata & FAISS Index ===
-df = pd.read_pickle("metadata.pkl")
-index = faiss.read_index("faiss_index.bin")
+        embedding_model = get_embedding_model()
+        faiss_index = FAISS.from_documents(docs, embedding_model)
 
-# === Step 2: Load Embedding Model ===
-model = SentenceTransformer("all-MiniLM-L6-v2")
+        # Perform similarity search
+        results = faiss_index.similarity_search(query, k=10)
 
-# === Step 3: Ollama Function ===
-def query_ollama(text, model_name="llama3"):
-    prompt = FULL_PROMPT_TEMPLATE.format(abstract=text)
-    result = subprocess.run(
-        ["ollama", "run", model_name],
-        input=prompt,
-        capture_output=True,
-        text=True
-    )
-    return result.stdout.strip().upper()
+        st.subheader("📌 Top 10 Most Relevant Results")
+        for i, doc in enumerate(results, 1):
+            metadata = doc.metadata
+            st.markdown(f"**{i}. PMID:** {metadata.get('PMID', 'N/A')}")
+            st.markdown(f"**Title:** {metadata.get('Title', 'N/A')}")
+            st.markdown(f"**Summary:** {doc.page_content}")
+            st.markdown("---")
 
-# === Step 4: (Optional) Filter FAISS Top-K ===
-def semantic_filter(query, top_k=500):
-    query_vector = model.encode([query])[0].astype("float32")
-    _, I = index.search(np.array([query_vector]), top_k)
-    return df.iloc[I[0]]
+    except Exception as e:
+        st.error(f"❌ Error: {str(e)}")
 
-# === Step 5: Run Classification ===
-filtered_df = semantic_filter("adverse drug reaction", top_k=500)
-
-inclusion_rows = []
-exclusion_rows = []
-
-for _, row in filtered_df.iterrows():
-    abstract = row["Abstract"]
-    decision = query_ollama(abstract)
-
-    if "INCLUSION" in decision:
-        inclusion_rows.append(row)
-    elif "EXCLUSION" in decision:
-        exclusion_rows.append(row)
-    else:
-        print("⚠️ Ambiguous result:", decision)
-
-# === Step 6: Save Results ===
-inclusion_df = pd.DataFrame(inclusion_rows)
-exclusion_df = pd.DataFrame(exclusion_rows)
-
-inclusion_df.to_csv("relevant_df.csv", index=False)
-exclusion_df.to_csv("irrelevant_df.csv", index=False)
-
-print("✅ Classification completed and saved to CSV.")
-
-
-###############################################################
-
-
-
-
+elif run_button:
+    st.warning("⚠️ Please upload a file and enter a query.")
