@@ -47,5 +47,9 @@ No new safety information identified.
 •	11.8 Other relevant literature
 No other relevant articles found.
  
- 
+Add in the new template the below line
+Main Issue That we Face 
+
+Even a small change in Prompt/Architecture require testing which in turn to take 2 to 3 hr which is not fessible AWS  Access as we are not able to test  are architecture making it difficult anf making our progress slower, we have tried to make the code efficient but we are near the hardware limit of our device.
+
  
