@@ -1,0 +1,51 @@
+Literature Review Workflow and Challenges
+In our typical PubMed search, we retrieve between 600 to 2,500 articles. Out of these:
+•	Around 25–50% are relevant based on keywords or semantic matches—thanks to PubMed’s built-in filtering.
+•	A large portion of these relevant articles fall under the "Others" category.
+•	A small group (fewer than 50 articles) are non-abstracted, which means they need to be manually reviewed by a Pharmacovigilance (PV) expert.
+Even within the remaining 50% of articles, we often find valuable content—especially for the "Benefits" and "Others" sections of our safety reports.
+Benefits Section
+•	We don’t look for a specific article here. Instead, we choose the best available article that highlights the drug’s benefits for each indication.
+•	If we don’t find a better article than the one used in the previous reporting period, we simply carry forward the previous one.
+•	Occasionally, we come across articles that relate to other indications, but these are rare, and our current algorithm hasn’t been tested to handle such cases.
+Safety Section – "Others" Subsection
+This is the most complex part of the review. It can include any kind of safety-related information, making it hard to define and filter.
+Here’s how we’re approaching it:
+•	We use a small language model (~1.7B parameters) to generate initial summaries and assess whether an article is relevant to safety or benefits.
+•	For benefits, we pick the top articles that best explain the drug’s positive effects.
+•	For safety, especially the "Others" section, we’re still refining our strategy because the criteria are broad and not well-defined.
+Safety Subquestions
+•	For most subquestions, we use a keyword-based filtering method, including MeSH terms and related expressions.
+•	The "Others" subquestion is particularly challenging. It requires the LLM to review each article individually, which is computationally heavy and not feasible with our current setup.
+•	This is where cloud-based solutions like AWS could make a big difference.
+Model Pipeline
+Our current pipeline works in two stages:
+1.	Initial filtering and summarization using a smaller model.
+2.	Final processing with a larger, more capable LLM that: 
+o	Makes informed decisions.
+o	Selects top articles for benefits.
+o	Includes all relevant articles for safety implications.
+This is an iterative process. Right now, we’re focusing on precision—making sure we capture all relevant positives. Once that’s stable, we’ll tune for sensitivity to improve recall.
+We have a solid approach for most subquestions, but the "Others" category and new safety indications still need work. We’re confident that once we move to cloud-hosted LLMs, which are faster and smarter, we’ll see much better results.
+For now, we’re sticking with keyword-based filtering for the "Others" section. It’s not perfect, but it’s a good starting point for testing and iteration.
+Safety Subquestion for Literature review
+•	11.1 Pregnancy outcomes (including termination)
+o	I. With specific safety implications: No relevant articles found.
+o	II. Without specific safety implications: No relevant articles found.
+•	11.2 Use in paediatric populations
+No relevant articles found.
+•	11.3 Compassionate supply / Named patient use
+No relevant articles found.
+•	11.4 Lack of efficacy
+No relevant articles found.
+•	11.5 Asymptomatic overdose / Abuse / Misuse
+No relevant articles found.
+•	11.6 Medication error (no adverse events)
+No relevant articles found.
+•	11.7 Important non-clinical safety results
+No new safety information identified.
+•	11.8 Other relevant literature
+No other relevant articles found.
+ 
+ 
+ 
