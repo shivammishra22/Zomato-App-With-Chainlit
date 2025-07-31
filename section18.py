@@ -1,421 +1,151 @@
-from langchain_community.utilities import SerpAPIWrapper
-from langchain_ollama import ChatOllama
-from langchain_core.messages import HumanMessage
-
-# Your SerpAPI key
-api_key = "adb5d6da4a13ced8ad8f6f0d7b41804ae6df887f43d142ecfedaaa3c223eeebe"
-
-# Initialize the SerpAPIWrapper with your API key
-serpapi_wrapper = SerpAPIWrapper(serpapi_api_key=api_key)
-
- # "What are the other antipsychotic medications similar to olanzapine?"
-
-# Improved query for better search results
-query = "what are the other phosphodiesterase inhibitor medicine similar to Tadalafil ?"
-
-# Perform a search
-results = serpapi_wrapper.run(query)
-
-# Initialize the ChatOllama model
-llm = ChatOllama(model="gemma3:4b", temperature=0.1, num_ctx=2000)
-
-# Prepare the prompt for the LLM
-prompt = f"Based on the following information, please list the antipsychotic medications similar to Tadalafil:\n\n{results}"
-
-# Get the response from the LLM using a HumanMessage
-response = llm([HumanMessage(content=prompt)])
-
-# Print the response
-print(response.content)
-# Metion the name output as the option in the Streamlit app to pass or user can also pass as per wish add this Drug name in the Pubmed Keyword serch in next code
-################################
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 
 import streamlit as st
+import pandas as pd
 import io
 import time
-import pandas as pd
+import re
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
+from tqdm import tqdm
+
+from langchain_community.utilities import SerpAPIWrapper
+from langchain_community.document_loaders import DataFrameLoader
+from langchain_ollama import ChatOllama
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate
+from langchain.chains import LLMChain
 
 try:
     from Bio import Entrez
 except ImportError:
-    st.error("Error: Biopython not installed. Run:  pip install biopython")
+    st.error("Biopython not installed. Please run `pip install biopython`")
     st.stop()
 
-
+# -- PubMed Extractor Class --
 class PubMedExtractor:
     def __init__(self, email: str, api_key: Optional[str] = None):
         Entrez.email = email
         if api_key:
             Entrez.api_key = api_key
 
-    def search_pubmed(
-        self,
-        search_term: str,
-        journal: Optional[str] = None,
-        species: Optional[str] = None,
-        publication_type: Optional[str] = None,
-        language: Optional[str] = None,
-        age_group: Optional[str] = None,
-        free_full_text: bool = False,
-        author: Optional[str] = None,
-        mesh_terms: Optional[str] = None,
-    ) -> Tuple[List[str], str, int]:
-        query_parts = [search_term]
-
-        if journal:
-            query_parts.append(f'"{journal}"[Journal]')
-        if species and species.lower() != "all":
-            if species.lower() == "humans":
-                query_parts.append('"humans"[MeSH Terms]')
-            elif species.lower() == "animals":
-                query_parts.append('"animals"[MeSH Terms]')
-        if publication_type and publication_type != "All":
-            query_parts.append(f'"{publication_type}"[Publication Type]')
-        if language and language != "All":
-            query_parts.append(f'"{language}"[Language]')
-        if age_group and age_group != "All":
-            query_parts.append(f'"{age_group}"[MeSH Terms]')
-        if free_full_text:
-            query_parts.append('"free full text"[sb]')
-        if author:
-            query_parts.append(f'"{author}"[Author]')
-        if mesh_terms:
-            for term in [t.strip() for t in mesh_terms.split(",")]:
-                query_parts.append(f'"{term}"[MeSH Terms]')
-
-        final_query = " AND ".join(query_parts)
-
-        try:
-            handle = Entrez.esearch(db="pubmed", term=final_query, retmax=0)
-            search_results = Entrez.read(handle)
-            handle.close()
-
-            total_count = int(search_results["Count"])
-            if total_count == 0:
-                return [], final_query, 0
-
-            max_retrievable = min(total_count, 20)
-
-            handle = Entrez.esearch(
-                db="pubmed",
-                term=final_query,
-                retmax=max_retrievable,
-                sort="relevance"
-            )
-            search_results = Entrez.read(handle)
-            handle.close()
-
-            pmids = search_results.get("IdList", [])
-            return pmids, final_query, total_count
-
-        except Exception as e:
-            st.error(f"Error searching PubMed: {e}")
-            return [], "", 0
+    def search_pubmed(self, search_term: str, retmax: int = 20) -> List[str]:
+        handle = Entrez.esearch(db="pubmed", term=search_term, retmax=retmax)
+        search_results = Entrez.read(handle)
+        handle.close()
+        return search_results.get("IdList", [])
 
     def fetch_abstracts(self, pmids: List[str]) -> List[Dict]:
         if not pmids:
             return []
-
+        handle = Entrez.efetch(db="pubmed", id=pmids, rettype="medline", retmode="xml")
+        records = Entrez.read(handle)
+        handle.close()
         articles = []
-        batch_size = 500
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-
-        for i in range(0, len(pmids), batch_size):
-            batch_pmids = pmids[i:i + batch_size]
-            progress = (i + batch_size) / max(len(pmids), 1)
-            progress_bar.progress(min(progress, 1.0))
-            status_text.text(f"Fetching articles {i + 1} to {min(i + batch_size, len(pmids))} of {len(pmids)}...")
-
-            try:
-                handle = Entrez.efetch(db="pubmed", id=batch_pmids, rettype="medline", retmode="xml")
-                records = Entrez.read(handle)
-                handle.close()
-
-                for record in records.get("PubmedArticle", []):
-                    article_info = self._parse_article(record)
-                    if article_info:
-                        articles.append(article_info)
-
-                time.sleep(0.1)
-
-            except Exception as e:
-                st.warning(f"Error fetching batch {i // batch_size + 1}: {e}")
-                continue
-
-        progress_bar.progress(1.0)
-        status_text.text(f"Successfully extracted information for {len(articles)} articles")
-
-        return articles
-
-    def _parse_article(self, record) -> Optional[Dict]:
-        try:
+        for record in records.get("PubmedArticle", []):
             medline = record.get("MedlineCitation", {})
             article = medline.get("Article", {})
             pmid = medline.get("PMID", "")
-
             title = article.get("ArticleTitle", "N/A")
-
-            abstract_sections = article.get("Abstract", {}).get("AbstractText", [])
-            abstract = " ".join([str(section) for section in abstract_sections]) if isinstance(abstract_sections, list) else str(abstract_sections) if abstract_sections else "N/A"
-
-            authors = []
-            for auth in article.get("AuthorList", []):
-                if "LastName" in auth and "ForeName" in auth:
-                    authors.append(f"{auth['LastName']}, {auth['ForeName']}")
-                elif "CollectiveName" in auth:
-                    authors.append(auth["CollectiveName"])
-            authors_str = "; ".join(authors) if authors else "N/A"
-
-            journal_info = article.get("Journal", {})
-            journal_title = journal_info.get("Title", "N/A")
-
-            pub_date = "N/A"
-            pub_year = "N/A"
-            if "JournalIssue" in journal_info and "PubDate" in journal_info["JournalIssue"]:
-                date_info = journal_info["JournalIssue"]["PubDate"]
-                year = str(date_info.get("Year", "")).strip()
-                month = str(date_info.get("Month", "")).strip()
-                day = str(date_info.get("Day", "")).strip()
-                pub_date = "-".join([x for x in [year, month, day] if x])
-                pub_year = year if year else "N/A"
-
-            doi = "N/A"
-            article_ids = record.get("PubmedData", {}).get("ArticleIdList", [])
-            for article_id in article_ids:
-                if article_id.attributes.get("IdType") == "doi":
-                    doi = str(article_id)
-                    break
-
-            keywords = []
-            for kw_group in medline.get("KeywordList", []):
-                for kw in kw_group:
-                    keywords.append(str(kw))
-            keywords_str = "; ".join(keywords) if keywords else "N/A"
-
-            return {
-                "PMID": str(pmid),
+            abstract = article.get("Abstract", {}).get("AbstractText", ["N/A"])
+            if isinstance(abstract, list):
+                abstract = " ".join(abstract)
+            authors = article.get("AuthorList", [])
+            author_names = "; ".join([a.get("LastName", "") + ", " + a.get("ForeName", "") for a in authors if "LastName" in a and "ForeName" in a])
+            journal = article.get("Journal", {}).get("Title", "N/A")
+            year = article.get("Journal", {}).get("JournalIssue", {}).get("PubDate", {}).get("Year", "N/A")
+            articles.append({
+                "PMID": pmid,
                 "Title": title,
                 "Abstract": abstract,
-                "Authors": authors_str,
-                "Journal": journal_title,
-                "Publication_Date": pub_date,
-                "Publication_Year": pub_year,
-                "DOI": doi,
-                "Keywords": keywords_str,
-                "PubMed_URL": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-            }
+                "Authors": author_names,
+                "Journal": journal,
+                "Publication_Year": year
+            })
+        return articles
 
-        except Exception:
-            return None
-
-
+# -- Streamlit App --
 def main():
-    st.set_page_config(page_title="PubMed Search Tool", page_icon="🔬", layout="wide")
-    st.title("🔬 PubMed Abstract Extractor")
-    st.caption("🔝 This version is limited to the top 20 most relevant articles.")
-    st.markdown("Search PubMed and extract abstracts with comprehensive filtering options.")
+    st.set_page_config(page_title="Pharmacovigilance Search Tool", layout="wide")
+    st.title("🔎 Pharmacovigilance Abstract Analyzer")
 
     with st.sidebar:
-        st.header("⚙️ Configuration")
-        email = st.text_input("Email Address*", help="Required by NCBI for API access")
-        api_key = st.text_input("NCBI API Key", type="password", help="Optional: For higher rate limits")
-        if not email:
-            st.warning("Please enter your email address to proceed")
-            st.stop()
+        st.header("🔧 Configuration")
+        email = "your_email@example.com"  # Default email to avoid manual entry
+        api_key = "6f5df4899c545b65d2b584c22e70ec181608"  # Automatically used
+        serpapi_key = "adb5d6da4a13ced8ad8f6f0d7b41804ae6df887f43d142ecfedaaa3c223eeebe"  # Automatically used
+        model_name = st.selectbox("LLM Model", ["gemma3:4b", "qwen3:4b"], index=0)
 
-    st.header("🔍 Search Query")
-    search_term = st.text_area(
-        "Search Terms*",
-        placeholder="e.g., (diabetes) AND (treatment) NOT (case report)",
-        help="Use PubMed syntax: AND, OR, NOT",
-    )
+    # SerpAPI Search
+    st.subheader("🧠 Step 1: Drug Discovery using SerpAPI")
+    base_query = st.text_input("Query", value="what are the other phosphodiesterase inhibitor medicine similar to Tadalafil ?")
+    if st.button("🔍 Find Related Drugs"):
+        serpapi = SerpAPIWrapper(serpapi_api_key=serpapi_key)
+        serp_results = serpapi.run(base_query)
+        llm = ChatOllama(model=model_name, temperature=0.1, num_ctx=2000)
+        llm_prompt = f"""
+        From the following search result text, extract and list all phosphodiesterase inhibitor drugs similar to Tadalafil. Just give names:
 
-    with st.expander("🔧 Advanced Filters", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            journal = st.text_input("Journal Name", placeholder="e.g., Nature")
-            author = st.text_input("Author Name", placeholder="e.g., Smith J")
-            mesh_terms = st.text_input("MeSH Terms", placeholder="e.g., Diabetes Mellitus, Hypertension")
-        with c2:
-            species = st.selectbox("Species", ["All", "Humans", "Animals"])
-            publication_type = st.selectbox(
-                "Publication Type",
-                ["All", "Clinical Trial", "Randomized Controlled Trial", "Review", "Meta-Analysis",
-                 "Case Reports", "Observational Study", "Letter", "Editorial"],
-            )
-            language = st.selectbox("Language", ["All", "English", "Spanish", "French", "German", "Italian", "Japanese"])
-        with c3:
-            age_group = st.selectbox("Age Group", ["All", "Infant", "Child", "Adolescent", "Adult", "Middle Aged", "Aged"])
-            free_full_text = st.checkbox("Free Full Text Only")
-            remove_empty_abstracts = st.checkbox("Remove rows with empty 'Abstract'", value=True)
-            st.subheader("Result Limits")
-            st.info("Top 20 most relevant articles will be fetched.")
-            max_results = 20
+        {serp_results}
+        """
+        llm_response = llm([HumanMessagePromptTemplate.from_template(llm_prompt).format()])
+        extracted_drugs = llm_response.content
+        st.success("✅ Extracted Drugs:")
+        st.code(extracted_drugs)
+        st.session_state["drug_names"] = extracted_drugs
 
-    if search_term:
-        st.subheader("🔍 Search Preview")
-        preview_parts = [search_term]
-        if journal:
-            preview_parts.append(f'"{journal}"[Journal]')
-        if species and species != "All":
-            preview_parts.append(f'"{species.lower()}"[MeSH Terms]')
-        if publication_type and publication_type != "All":
-            preview_parts.append(f'"{publication_type}"[Publication Type]')
-        if language and language != "All":
-            preview_parts.append(f'"{language}"[Language]')
-        if age_group and age_group != "All":
-            preview_parts.append(f'"{age_group}"[MeSH Terms]')
-        if free_full_text:
-            preview_parts.append('"free full text"[sb]')
-        if author:
-            preview_parts.append(f'"{author}"[Author]')
-        if mesh_terms:
-            for t in [m.strip() for m in mesh_terms.split(",")]:
-                preview_parts.append(f'"{t}"[MeSH Terms]')
-        st.code(" AND ".join(preview_parts), language="text")
-
-    if st.button("🔍 Search PubMed", type="primary", disabled=not (search_term and email)):
+    # PubMed Search
+    st.subheader("📚 Step 2: PubMed Abstract Extraction")
+    drug_input = st.text_area("Enter Drug Names to Search", value=st.session_state.get("drug_names", "Tadalafil"))
+    if st.button("🔬 Fetch PubMed Abstracts"):
+        search_term = f"({drug_input}) AND (efficacy OR effectiveness OR treatment OR outcome) AND humans"
         extractor = PubMedExtractor(email, api_key)
-
-        with st.spinner("Searching PubMed..."):
-            pmids, query, total_count = extractor.search_pubmed(
-                search_term=search_term,
-                journal=journal or None,
-                species=species if species != "All" else None,
-                publication_type=publication_type if publication_type != "All" else None,
-                language=language if language != "All" else None,
-                age_group=age_group if age_group != "All" else None,
-                free_full_text=free_full_text,
-                author=author or None,
-                mesh_terms=mesh_terms or None,
-            )
-
-        if not pmids:
-            st.warning("No articles found matching your criteria.")
-            st.info(f"**Search Query Used:** {query}")
-            st.stop()
-
-        st.success(f"Found {total_count} articles (retrieving top {min(len(pmids), max_results)})")
-        st.info(f"**Search Query Used:** {query}")
-
-        pmids = pmids[:max_results]
-
-        with st.spinner("Fetching article details..."):
-            articles = extractor.fetch_abstracts(pmids)
-
-        if not articles:
-            st.error("No article details could be fetched.")
-            st.stop()
-
+        pmids = extractor.search_pubmed(search_term)
+        st.info(f"Found {len(pmids)} articles, fetching abstracts...")
+        articles = extractor.fetch_abstracts(pmids)
         df = pd.DataFrame(articles)
+        st.session_state["abstract_df"] = df
+        st.dataframe(df)
 
-        if remove_empty_abstracts:
-            before = len(df)
-            df = df[df["Abstract"].str.strip().ne("N/A") & df["Abstract"].str.strip().ne("")]
-            st.info(f"🧹 Removed {before - len(df)} rows with empty abstracts.")
+    # Summarization
+    if "abstract_df" in st.session_state:
+        st.subheader("🧾 Step 3: Summarization of Abstracts")
+        df = st.session_state["abstract_df"]
+        summarizer = ChatOllama(model=model_name, temperature=0.1, num_ctx=2000)
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a pharmacovigilance expert. Summarize the following medical abstract clearly."),
+            ("human", "{Abstract}")
+        ])
+        chain = LLMChain(llm=summarizer, prompt=prompt)
+        summaries = []
+        for abstract in tqdm(df['Abstract'], desc="Summarizing"):
+            result = chain.invoke({"Abstract": abstract})
+            summaries.append(result['text'])
+        df['Summary'] = summaries
+        st.dataframe(df[['PMID', 'Title', 'Summary']])
 
-        st.header("📊 Results")
-        st.metric("Articles Returned", len(df))
+        # Selection step
+        st.subheader("🎯 Step 4: Select Relevant Summaries")
+        filter_llm = ChatOllama(model="qwen3:4b", temperature=0.1, num_ctx=15000)
+        select_prompt = ChatPromptTemplate.from_messages([
+            HumanMessagePromptTemplate.from_template(
+                "Select top 3 abstracts from below summaries relevant to treatment of schizophrenia or psychotic disorders:\n\n{summaries}"
+            )
+        ])
+        select_chain = LLMChain(llm=filter_llm, prompt=select_prompt)
+        combined = "\n\n".join(f"PMID: {pid}\nAbstract: {summ}" for pid, summ in zip(df['PMID'], df['Summary']))
+        selection_result = select_chain.invoke({"summaries": combined})
 
-        st.subheader("📋 Article Details (truncated)")
-        display_df = df.copy()
-        display_df["Title"] = display_df["Title"].str.slice(0, 100) + "..."
-        display_df["Abstract"] = display_df["Abstract"].str.slice(0, 150) + "..."
-        st.dataframe(display_df[["PMID", "Title", "Authors", "Publication_Year", "Journal", "Publication_Date"]],
-                     use_container_width=True, hide_index=True)
+        selected_pmids = re.findall(r'PMID:\s*(\d+)', selection_result['text'])
+        filtered_df = df[df['PMID'].astype(str).isin(selected_pmids)]
+        st.success("Top 3 Selected Abstracts:")
+        st.dataframe(filtered_df)
 
-        st.subheader("💾 Download Results")
+        # Download option
         csv_buffer = io.StringIO()
-        df.to_csv(csv_buffer, index=False)
-        csv_string = csv_buffer.getvalue()
-        filename = f"pubmed_results_top20_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-
-        st.download_button("📥 Download CSV", csv_string, file_name=filename, mime="text/csv", type="primary")
-
-        with st.expander("👀 Preview Full DataFrame"):
-            st.dataframe(df, use_container_width=True)
-
+        filtered_df.to_csv(csv_buffer, index=False)
+        st.download_button("📥 Download Selected", csv_buffer.getvalue(), file_name="top3_selected.csv", mime="text/csv")
 
 if __name__ == "__main__":
     main()
-################################################
-# Download the file from the above pubmed
-import pandas as pd
-df=pd.read_csv(r"C:\Users\shivam.mishra2\Downloads\Quetiapine_2025.csv")
-df.sample()
-from langchain_ollama import ChatOllama
-from langchain_community.document_loaders import DataFrameLoader
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.prompts import ChatPromptTemplate
-from langchain.chains import LLMChain
-embeddings=HuggingFaceEmbeddings(model_name='NeuML/pubmedbert-base-embeddings')
-llm=ChatOllama(model='gemma3:4b',temperature=0.1,num_ctx=2000)
-
-###Apply the streamlit app that take the user query as per the user wish
-prompt=ChatPromptTemplate.from_messages([
-    ("system","set\no think You are the pharmacovigilence expert we give you Article related to Medical Abstract Create the Summary of that Data Frame"),
-    ('human','Summarize the Following Abstract{Abstract}')
-])
-chain=LLMChain(llm=llm,prompt=prompt)
-from tqdm import tqdm 
-summary=[]
-for abstract in tqdm(df['Abstract']):
-    result=chain.invoke({'Abstract':abstract})
-    summary.append(result['text'])
-df['summary']=summary
-from langchain_core.prompts import HumanMessagePromptTemplate
-
-prompt_message = HumanMessagePromptTemplate.from_template(
-    template="Select the top 3 abstracts from the following summaries that best match the indication: Treatment of schizophrenia or psychotic disorders.\n\n{summaries}"
-)
-
-from langchain_core.prompts import HumanMessagePromptTemplate, ChatPromptTemplate
-from langchain.chains import LLMChain
-from langchain_ollama import ChatOllama
-
-# Define the LLM
-llm = ChatOllama(model="qwen3:4b", reasoning=False, temperature=0.1, num_ctx=15000)
-
-# Define the prompt
-human_prompt = HumanMessagePromptTemplate.from_template(
-    "Select the top 3 abstracts from the following list that best match the indication: Treatment of schizophrenia or psychosis.\n\n{summaries}"
-)
-
-# Wrap in ChatPromptTemplate
-chat_prompt = ChatPromptTemplate.from_messages([human_prompt])
-
-# Create the chain
-chain = LLMChain(llm=llm, prompt=chat_prompt)
-
-# Combine PMID and summary into a single string per abstract
-combined_summaries = "\n\n".join(
-    f"PMID: {pmid}\nAbstract: {summary}" for pmid, summary in zip(df['PMID'], df['summary'])
-)
-
-# Invoke the chain
-response = chain.invoke({"summaries": combined_summaries})
-
-import re
-
-# Sample result text
-text = response['text']
-
-# Regex pattern to find all PMID values
-pmid_list = re.findall(r'PMID:\s*(\d+)', text)
-
-# Output the list of PMIDs
-print(pmid_list)
-
-
-# Ensure 'PMID' column is treated as string for matching
-filtered_df = df[df['PMID'].astype(str).isin(pmid_list)]
-filtered_df
-# correct the above code and intergate the all things in one streamlit code to doo all the correactly step by step
