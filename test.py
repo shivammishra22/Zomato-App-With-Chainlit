@@ -6,10 +6,6 @@ import pandas as pd
 import numpy as np
 from docx import Document
 from bs4 import BeautifulSoup
-import mammoth
-import re
-from docx import Document
-
 
 # =========================================================
 # 0. CONFIG
@@ -39,23 +35,16 @@ PRODUCT_DOSAGE_MAP = {
 # 1. UTILITIES
 # =========================================================
 def extract_table_by_index(doc_path, table_index=2):
-    """Extract table by index from a Word document (.docx)"""
     doc = Document(doc_path)
-
     if table_index >= len(doc.tables):
         print(f"❌ Table index {table_index} out of range. Total tables: {len(doc.tables)}")
         return None
-
     table = doc.tables[table_index]
     table_data = []
-
     for row in table.rows:
         table_data.append([cell.text.strip() for cell in row.cells])
-
-    # Remove duplicate header row if present
     if len(table_data) > 1 and table_data[0] == table_data[1]:
         table_data.pop(1)
-
     return table_data
 
 def save_table_to_excel(table_data, excel_path):
@@ -63,7 +52,6 @@ def save_table_to_excel(table_data, excel_path):
     df = pd.DataFrame(table_data[1:], columns=table_data[0])
     df.to_excel(excel_path, index=False)
     print(f"✅ Table saved to: {excel_path}")
-
 
 def generate_fallback_doc(medicine):
     doc = Document()
@@ -77,7 +65,6 @@ def generate_fallback_doc(medicine):
     doc.save(out)
     print(f"📄 Placeholder Word document saved as '{out}'")
 
-
 def map_dosage(product_name):
     if pd.isna(product_name):
         return ""
@@ -86,7 +73,6 @@ def map_dosage(product_name):
         if k.lower() in name:
             return v
     return ""
-
 
 def add_dosage_column(df):
     src_col = None
@@ -100,59 +86,37 @@ def add_dosage_column(df):
     df["Dosage Form (Units)"] = df[src_col].apply(map_dosage)
     return df
 
-
 def nice_int(x):
     try:
         return f"{int(float(str(x).replace(',', ''))):,}"
     except Exception:
         return x
 
-
 def format_df_for_report(df: pd.DataFrame, ddd_value: float) -> pd.DataFrame:
-    """Rename + reorder columns to: Country | Molecule | Dosage Form (Units) | Formulation Strength | DDD* |
-       Pack size | Sales figure (units)/Quantity Sold | Sales Figure (mg) or period/Volume of sales (in mg) |
-       Patients Exposure (PTY) for period
-    """
     df = add_dosage_column(df)
-
-    # Formulation Strength from 'Strength in mg'
     if "Strength in mg" in df.columns:
-        df["Formulation Strength"] = df["Strength in mg"].apply(
-            lambda v: f"{int(v)} mg" if pd.notna(v) else "")
-
+        df["Formulation Strength"] = df["Strength in mg"].apply(lambda v: f"{int(v)} mg" if pd.notna(v) else "")
     df["DDD*"] = f"{int(ddd_value)} mg"
-
-    # Sales figure units
     unit_col = "Number of tablets / Capsules/Injections"
     if unit_col in df.columns:
         df["Sales figure (units)/Quantity Sold"] = df[unit_col]
-
-    # final rename not necessary if already same
     desired = [
-        "Country",
-        "Molecule",
-        "Dosage Form (Units)",
-        "Formulation Strength",
-        "DDD*",
-        "Pack size",
-        "Sales figure (units)/Quantity Sold",
+        "Country", "Molecule", "Dosage Form (Units)", "Formulation Strength", "DDD*",
+        "Pack size", "Sales figure (units)/Quantity Sold",
         "Sales Figure (mg) or period/Volume of sales (in mg)",
         "Patients Exposure (PTY) for period",
     ]
-
     present = [c for c in desired if c in df.columns]
-    others  = [c for c in df.columns if c not in present]
+    others = [c for c in df.columns if c not in present]
     df = df[present + others]
-
-    # number formatting
-    for col in ["Sales figure (units)/Quantity Sold",
-                "Sales Figure (mg) or period/Volume of sales (in mg)",
-                "Patients Exposure (PTY) for period"]:
+    for col in [
+        "Sales figure (units)/Quantity Sold",
+        "Sales Figure (mg) or period/Volume of sales (in mg)",
+        "Patients Exposure (PTY) for period"
+    ]:
         if col in df.columns:
             df[col] = df[col].apply(nice_int)
-
     return df
-
 
 def add_table_with_data(doc: Document, dataframe: pd.DataFrame, title: str):
     doc.add_heading(title, level=2)
@@ -161,12 +125,10 @@ def add_table_with_data(doc: Document, dataframe: pd.DataFrame, title: str):
     hdr_cells = table.rows[0].cells
     for i, col_name in enumerate(dataframe.columns):
         hdr_cells[i].text = str(col_name)
-
     for _, row in dataframe.iterrows():
         row_cells = table.add_row().cells
         for i, item in enumerate(row):
             row_cells[i].text = "" if pd.isna(item) else str(item)
-
 
 def create_clean_total_row(df_, total_col="Patients Exposure (PTY) for period"):
     numeric = pd.to_numeric(df_[total_col].astype(str).str.replace(',', ''), errors='coerce')
@@ -177,22 +139,18 @@ def create_clean_total_row(df_, total_col="Patients Exposure (PTY) for period"):
     return pd.DataFrame([blank])
 
 # =========================================================
-# 2. CORE
+# 2. CORE FUNCTION
 # =========================================================
 def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, medicine, place, date):
     df = pd.read_excel(excel_path, engine='openpyxl')
 
-    # Clean & numeric prep
     if "Strength in mg" in df.columns:
         df["Strength in mg"] = df["Strength in mg"].astype(str).str.replace("mg", "", regex=False).str.strip()
         df["Strength in mg"] = pd.to_numeric(df["Strength in mg"], errors='coerce')
 
     unit_col = "Number of tablets / Capsules/Injections"
     if unit_col in df.columns:
-        df[unit_col] = (df[unit_col].astype(str)
-                        .str.replace(",", "", regex=False)
-                        .str.split(":").str[-1]
-                        .str.strip())
+        df[unit_col] = df[unit_col].astype(str).str.replace(",", "", regex=False).str.split(":").str[-1].str.strip()
         df[unit_col] = pd.to_numeric(df[unit_col], errors='coerce')
 
     if "Sales Figure (mg) or period/Volume of sales (in mg)" not in df.columns:
@@ -207,32 +165,30 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
         df.rename(columns={"Product": "Molecule"}, inplace=True)
 
     if "Country" not in df.columns:
-        print("⚠️ 'Country' column missing. Setting all to 'Unknown'")
         df["Country"] = "Unknown"
 
-    df_sa  = df[df["Country"] == country_name].copy()
+    df_sa = df[df["Country"] == country_name].copy()
     df_non = df[df["Country"] != country_name].copy()
 
-    # Format & totals
-    df_sa_fmt  = format_df_for_report(df_sa,  ddd_value)
+    df_sa_fmt = format_df_for_report(df_sa, ddd_value)
     df_non_fmt = format_df_for_report(df_non, ddd_value)
 
-    df_sa_tot  = create_clean_total_row(df_sa_fmt)
+    df_sa_tot = create_clean_total_row(df_sa_fmt)
     df_non_tot = create_clean_total_row(df_non_fmt)
 
-    df_sa_fmt  = pd.concat([df_sa_fmt,  df_sa_tot],  ignore_index=True)
+    df_sa_fmt = pd.concat([df_sa_fmt, df_sa_tot], ignore_index=True)
     df_non_fmt = pd.concat([df_non_fmt, df_non_tot], ignore_index=True)
 
-    sa_total     = int(df_sa_tot["Patients Exposure (PTY) for period"].iloc[0])
+    sa_total = int(df_sa_tot["Patients Exposure (PTY) for period"].iloc[0])
     non_sa_total = int(df_non_tot["Patients Exposure (PTY) for period"].iloc[0])
-    combined     = sa_total + non_sa_total
+    combined = sa_total + non_sa_total
+
     print(f"📊 Combined Total Exposure: {combined}")
 
     if sa_total == 0:
         generate_fallback_doc(medicine)
         return
 
-    # Word
     doc = Document()
     doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
     doc.add_paragraph(
@@ -241,14 +197,13 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
         f"({place}: {sa_total} and Non {place}: {non_sa_total}) treatment days approximately and presented in Table 3."
     )
 
-    add_table_with_data(doc, df_sa_fmt,  f"                                                      {country_name} ")
+    add_table_with_data(doc, df_sa_fmt, f"                                                      {country_name} ")
     add_table_with_data(doc, df_non_fmt, f"                                                      Non-{country_name} ")
 
     out_doc = f"{medicine}_Exposure.docx"
     doc.save(out_doc)
     print(f"✅ Word document saved as '{out_doc}'")
 
-    # Overwrite Excel with formatted combined data
     final_df = pd.concat([
         df_sa_fmt.assign(_Section="SA"),
         df_non_fmt.assign(_Section="Non-SA")
@@ -257,7 +212,7 @@ def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, med
     print(f"✅ Final Excel overwritten with formatted columns: {EXCEL_OUTPUT_PATH}")
 
 # =========================================================
-# 3. DDD FALLBACK
+# 3. DDD FALLBACK FETCH
 # =========================================================
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -281,7 +236,7 @@ def fetch_ddd_fallback(medicine, code):
         return np.nan
 
 # =========================================================
-# 4. MAIN
+# 4. MAIN EXECUTION
 # =========================================================
 if __name__ == "__main__":
     try:
@@ -294,20 +249,16 @@ if __name__ == "__main__":
         if not os.path.exists(DOCX_PATH):
             raise FileNotFoundError(f"File not found: {DOCX_PATH}")
 
-        doc = Document(DOCX_PATH)
-        table_data = extract_table_by_index(doc, 2)
-        print("##############################################################################@@@@",table_data)
+        table_data = extract_table_by_index(DOCX_PATH, 2)
+        print("##############################################################################@@@@", table_data)
 
-        # --- DDD logic ---
         ddd_value = np.nan
         if not ddd_df.empty and "Drug Name" in ddd_df.columns:
             ddd_row = ddd_df[ddd_df["Drug Name"].str.lower() == MEDICINE.lower()]
         else:
             ddd_row = pd.DataFrame()
 
-        if (not ddd_row.empty and
-            "DDD Value" in ddd_row.columns and
-            not pd.isna(ddd_row.iloc[0]["DDD Value"])):
+        if not ddd_row.empty and "DDD Value" in ddd_row.columns and not pd.isna(ddd_row.iloc[0]["DDD Value"]):
             ddd_value = ddd_row.iloc[0]["DDD Value"]
             print(f"✅ DDD value found in Excel: {ddd_value}")
         else:
@@ -332,8 +283,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"⚠️ Error: {e}")
         generate_fallback_doc(MEDICINE)
-
-# correct the bellow erro
-# ⚠️ Error: 'Document' object has no attribute 'seek'
-# 📄 Placeholder Word document saved as 'Olanzapine_Exposure.docx'
     
