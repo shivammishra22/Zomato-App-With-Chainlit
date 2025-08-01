@@ -23,7 +23,6 @@ except ImportError:
     st.error("Biopython not installed. Please run `pip install biopython`")
     st.stop()
 
-
 # -- PubMed Extractor Class --
 class PubMedExtractor:
     def __init__(self, email: str, api_key: Optional[str] = None):
@@ -76,7 +75,7 @@ def main():
 
     with st.sidebar:
         st.header("🔧 Configuration")
-        email = "your_email@example.com"  # Default email
+        email = "your_email@example.com"
         api_key = "6f5df4899c545b65d2b584c22e70ec181608"
         serpapi_key = "adb5d6da4a13ced8ad8f6f0d7b41804ae6df887f43d142ecfedaaa3c223eeebe"
         model_name = st.selectbox("LLM Model", ["gemma3:4b", "qwen3:4b"], index=0)
@@ -131,15 +130,17 @@ def main():
         st.session_state["abstract_df"] = df  # Save back
         st.dataframe(df[['PMID', 'Title', 'Summary']])
 
-    # Step 4: Select Relevant Summaries
+    # Step 4: Select Relevant Summaries (UPDATED with regex-based PMID matching)
     st.subheader("🎯 Step 4: Select Relevant Summaries")
     if "abstract_df" in st.session_state and 'Summary' in st.session_state["abstract_df"].columns:
         df = st.session_state["abstract_df"]
 
+        # Combine summaries with PMIDs
         combined_summaries = "\n\n".join(
             f"PMID: {pmid}\nAbstract: {summary}" for pmid, summary in zip(df['PMID'], df['Summary'])
         )
 
+        # LLM for selection
         filter_llm = ChatOllama(model="qwen3:4b", temperature=0.1, num_ctx=15000)
         human_prompt = HumanMessagePromptTemplate.from_template(
             "Select the top 3 abstracts from the following list that best match the indication: Treatment of schizophrenia or psychosis.\n\n{summaries}"
@@ -147,11 +148,19 @@ def main():
         chat_prompt = ChatPromptTemplate.from_messages([human_prompt])
         select_chain = LLMChain(llm=filter_llm, prompt=chat_prompt)
 
+        # Get LLM response and extract text
         response = select_chain.invoke({"summaries": combined_summaries})
-        selected_pmids = re.findall(r'PMID:\s*(\d+)', response['text'])
+        text = response['text']
 
+        # Regex match PMIDs
+        selected_pmids = re.findall(r'PMID:\s*(\d+)', text)
+
+        st.code(f"PMIDs selected: {selected_pmids}")
+
+        # Filter results safely
         filtered_df = df[df['PMID'].astype(str).isin(selected_pmids)]
 
+        # Display and download
         st.success("Top 3 Selected Abstracts:")
         st.dataframe(filtered_df)
 
@@ -164,4 +173,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
