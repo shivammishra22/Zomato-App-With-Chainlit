@@ -1,286 +1,242 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
-import os, re, urllib3, requests
+import streamlit as st
 import pandas as pd
-import numpy as np
-from docx import Document
-from bs4 import BeautifulSoup
+import io
+import time
+import re
+from datetime import datetime
+from typing import List, Dict, Optional, Tuple
+from tqdm import tqdm
 
-# =========================================================
-# 0. CONFIG
-# =========================================================
-DOCX_PATH = r"C:\Users\shivam.mishra2\Downloads\ALL_PSUR_File\PSUR_all _Data\Olanzapine PSUR_South Africa_29-Sep-17 to 31-Mar-25\Draft\DRA\Data request form_olanzapine.docx"
-SEARCH_TEXT = "Cumulative sales data sale required"
-EXCEL_OUTPUT_PATH = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\marketing_exposure_tables.xlsx"
-DDD_EXCEL_PATH = r"drug_code_map_with_ddd.xlsx"
+from langchain_community.utilities import SerpAPIWrapper
+from langchain_community.document_loaders import DataFrameLoader
+from langchain_ollama import ChatOllama
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.prompts import ChatPromptTemplate, HumanMessagePromptTemplate
+from langchain.chains import LLMChain
 
-COUNTRY  = "South Africa"
-MEDICINE = "Olanzapine"
-PLACE    = "South Africa"
-DATE     = "2020-01-01"
+try:
+    from Bio import Entrez
+except ImportError:
+    st.error("Biopython not installed. Please run `pip install biopython`")
+    st.stop()
 
-PRODUCT_DOSAGE_MAP = {
-    "Esomeprazole": "Gastro-resistant",
-    "Zipola 5": "Film coated Tablet",
-    "Zipola 10": "Film coated Tablet",
-    "Jubilonz OD10": "Oro dispersible tablet",
-    "Jubilonz OD5": "Oro dispersible tablet",
-    "SCHIZOLANZ": "Oro dispersible tablet",
-    "Olanzapine film coated tablets": "Film coated Tablet",
-    "Olanzapine": "Film coated Tablet"
-}
+# -- PubMed Extractor Class --
+class PubMedExtractor:
+    def __init__(self, email: str, api_key: Optional[str] = None):
+        Entrez.email = email
+        if api_key:
+            Entrez.api_key = api_key
 
-# =========================================================
-# 1. UTILITIES
-# =========================================================
-def extract_table_by_index(doc_path, table_index=2):
-    doc = Document(doc_path)
-    if table_index >= len(doc.tables):
-        print(f"❌ Table index {table_index} out of range. Total tables: {len(doc.tables)}")
-        return None
-    table = doc.tables[table_index]
-    table_data = []
-    for row in table.rows:
-        table_data.append([cell.text.strip() for cell in row.cells])
-    if len(table_data) > 1 and table_data[0] == table_data[1]:
-        table_data.pop(1)
-    return table_data
+    def search_pubmed(self, search_term: str, retmax: int = 20) -> List[str]:
+        handle = Entrez.esearch(db="pubmed", term=search_term, retmax=retmax)
+        search_results = Entrez.read(handle)
+        handle.close()
+        return search_results.get("IdList", [])
 
-def save_table_to_excel(table_data, excel_path):
-    os.makedirs(os.path.dirname(excel_path), exist_ok=True)
-    df = pd.DataFrame(table_data[1:], columns=table_data[0])
-    df.to_excel(excel_path, index=False)
-    print(f"✅ Table saved to: {excel_path}")
+    def fetch_abstracts(self, pmids: List[str]) -> List[Dict]:
+        if not pmids:
+            return []
+        handle = Entrez.efetch(db="pubmed", id=pmids, rettype="medline", retmode="xml")
+        records = Entrez.read(handle)
+        handle.close()
+        articles = []
+        for record in records.get("PubmedArticle", []):
+            medline = record.get("MedlineCitation", {})
+            article = medline.get("Article", {})
+            pmid = medline.get("PMID", "")
+            title = article.get("ArticleTitle", "N/A")
+            abstract = article.get("Abstract", {}).get("AbstractText", ["N/A"])
+            if isinstance(abstract, list):
+                abstract = " ".join(abstract)
+            authors = article.get("AuthorList", [])
+            author_names = "; ".join([a.get("LastName", "") + ", " + a.get("ForeName", "") for a in authors if "LastName" in a and "ForeName" in a])
+            journal = article.get("Journal", {}).get("Title", "N/A")
+            year = article.get("Journal", {}).get("JournalIssue", {}).get("PubDate", {}).get("Year", "N/A")
+            articles.append({
+                "PMID": pmid,
+                "Title": title,
+                "Abstract": abstract,
+                "Authors": author_names,
+                "Journal": journal,
+                "Publication_Year": year
+            })
+        return articles
 
-def generate_fallback_doc(medicine):
-    doc = Document()
-    doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
-    doc.add_paragraph(
-        f"No cumulative and interval patient exposure from marketing experience was available as the MAH "
-        f"has not marketed its product {medicine} in any country since obtaining initial granting of MA "
-        f"till the DLP of this report."
-    )
-    out = f"{medicine}_Exposure.docx"
-    doc.save(out)
-    print(f"📄 Placeholder Word document saved as '{out}'")
+# -- Streamlit App --
+def main():
+    st.set_page_config(page_title="Pharmacovigilance Search Tool", layout="wide")
+    st.title("🔎 Pharmacovigilance Abstract Analyzer")
 
-def map_dosage(product_name):
-    if pd.isna(product_name):
-        return ""
-    name = str(product_name).lower()
-    for k, v in PRODUCT_DOSAGE_MAP.items():
-        if k.lower() in name:
-            return v
-    return ""
+    with st.sidebar:
+        st.header("🔧 Configuration")
+        email = "your_email@example.com"  # Default email to avoid manual entry
+        api_key = "6f5df4899c545b65d2b584c22e70ec181608"  # Automatically used
+        serpapi_key = "adb5d6da4a13ced8ad8f6f0d7b41804ae6df887f43d142ecfedaaa3c223eeebe"  # Automatically used
+        model_name = st.selectbox("LLM Model", ["gemma3:4b", "qwen3:4b"], index=0)
 
-def add_dosage_column(df):
-    src_col = None
-    for c in ["Product", "Molecule"]:
-        if c in df.columns:
-            src_col = c
-            break
-    if src_col is None:
-        print("⚠️ Neither 'Product' nor 'Molecule' found. Skipping dosage mapping.")
-        return df
-    df["Dosage Form (Units)"] = df[src_col].apply(map_dosage)
-    return df
+    # SerpAPI Search
+    st.subheader("🧠 Step 1: Drug Discovery using SerpAPI")
+    base_query = st.text_input("Query", value="what are the other phosphodiesterase inhibitor medicine similar to Tadalafil ?")
+    if st.button("🔍 Find Related Drugs"):
+        serpapi = SerpAPIWrapper(serpapi_api_key=serpapi_key)
+        serp_results = serpapi.run(base_query)
+        llm = ChatOllama(model=model_name, temperature=0.1, num_ctx=2000)
+        llm_prompt = f"""
+        From the following search result text, extract and list all phosphodiesterase inhibitor drugs similar to Tadalafil. Just give names:
 
-def nice_int(x):
-    try:
-        return f"{int(float(str(x).replace(',', ''))):,}"
-    except Exception:
-        return x
+        {serp_results}
+        """
+        llm_response = llm([HumanMessagePromptTemplate.from_template(llm_prompt).format()])
+        extracted_drugs = llm_response.content
+        st.success("✅ Extracted Drugs:")
+        st.code(extracted_drugs)
+        st.session_state["drug_names"] = extracted_drugs
 
-def format_df_for_report(df: pd.DataFrame, ddd_value: float) -> pd.DataFrame:
-    df = add_dosage_column(df)
-    if "Strength in mg" in df.columns:
-        df["Formulation Strength"] = df["Strength in mg"].apply(lambda v: f"{int(v)} mg" if pd.notna(v) else "")
-    df["DDD*"] = f"{int(ddd_value)} mg"
-    unit_col = "Number of tablets / Capsules/Injections"
-    if unit_col in df.columns:
-        df["Sales figure (units)/Quantity Sold"] = df[unit_col]
-    desired = [
-        "Country", "Molecule", "Dosage Form (Units)", "Formulation Strength", "DDD*",
-        "Pack size", "Sales figure (units)/Quantity Sold",
-        "Sales Figure (mg) or period/Volume of sales (in mg)",
-        "Patients Exposure (PTY) for period",
-    ]
-    present = [c for c in desired if c in df.columns]
-    others = [c for c in df.columns if c not in present]
-    df = df[present + others]
-    for col in [
-        "Sales figure (units)/Quantity Sold",
-        "Sales Figure (mg) or period/Volume of sales (in mg)",
-        "Patients Exposure (PTY) for period"
-    ]:
-        if col in df.columns:
-            df[col] = df[col].apply(nice_int)
-    return df
+    # PubMed Search
+    st.subheader("📚 Step 2: PubMed Abstract Extraction")
+    drug_input = st.text_area("Enter Drug Names to Search", value=st.session_state.get("drug_names", "Tadalafil"))
+    if st.button("🔬 Fetch PubMed Abstracts"):
+        search_term = f"({drug_input}) AND (efficacy OR effectiveness OR treatment OR outcome) AND humans"
+        extractor = PubMedExtractor(email, api_key)
+        pmids = extractor.search_pubmed(search_term)
+        st.info(f"Found {len(pmids)} articles, fetching abstracts...")
+        articles = extractor.fetch_abstracts(pmids)
+        df = pd.DataFrame(articles)
+        st.session_state["abstract_df"] = df
+        st.dataframe(df)
 
-def add_table_with_data(doc: Document, dataframe: pd.DataFrame, title: str):
-    doc.add_heading(title, level=2)
-    table = doc.add_table(rows=1, cols=len(dataframe.columns))
-    table.style = 'Table Grid'
-    hdr_cells = table.rows[0].cells
-    for i, col_name in enumerate(dataframe.columns):
-        hdr_cells[i].text = str(col_name)
-    for _, row in dataframe.iterrows():
-        row_cells = table.add_row().cells
-        for i, item in enumerate(row):
-            row_cells[i].text = "" if pd.isna(item) else str(item)
+    # Summarization
+    if "abstract_df" in st.session_state:
+        st.subheader("🧾 Step 3: Summarization of Abstracts")
+        df = st.session_state["abstract_df"]
+        summarizer = ChatOllama(model=model_name, temperature=0.1, num_ctx=2000)
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a pharmacovigilance expert. Summarize the following medical abstract clearly."),
+            ("human", "{Abstract}")
+        ])
+        chain = LLMChain(llm=summarizer, prompt=prompt)
+        summaries = []
+        for abstract in tqdm(df['Abstract'], desc="Summarizing"):
+            result = chain.invoke({"Abstract": abstract})
+            summaries.append(result['text'])
+        df['Summary'] = summaries
+        st.dataframe(df[['PMID', 'Title', 'Summary']])
 
-def create_clean_total_row(df_, total_col="Patients Exposure (PTY) for period"):
-    numeric = pd.to_numeric(df_[total_col].astype(str).str.replace(',', ''), errors='coerce')
-    total = int(numeric.sum()) if pd.notna(numeric.sum()) else 0
-    blank = {c: "" for c in df_.columns}
-    blank["Country"] = "Total"
-    blank[total_col] = total
-    return pd.DataFrame([blank])
+    # Step 4: Select Relevant Summaries
+    st.subheader("🎯 Step 4: Select Relevant Summaries")
+    if "abstract_df" in st.session_state:
+        df = st.session_state["abstract_df"]
 
-# =========================================================
-# 2. CORE FUNCTION
-# =========================================================
-def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, medicine, place, date):
-    df = pd.read_excel(excel_path, engine='openpyxl')
-
-    if "Strength in mg" in df.columns:
-        df["Strength in mg"] = df["Strength in mg"].astype(str).str.replace("mg", "", regex=False).str.strip()
-        df["Strength in mg"] = pd.to_numeric(df["Strength in mg"], errors='coerce')
-
-    unit_col = "Number of tablets / Capsules/Injections"
-    if unit_col in df.columns:
-        df[unit_col] = df[unit_col].astype(str).str.replace(",", "", regex=False).str.split(":").str[-1].str.strip()
-        df[unit_col] = pd.to_numeric(df[unit_col], errors='coerce')
-
-    if "Sales Figure (mg) or period/Volume of sales (in mg)" not in df.columns:
-        if unit_col in df.columns and "Strength in mg" in df.columns:
-            df["Sales Figure (mg) or period/Volume of sales (in mg)"] = df[unit_col] * df["Strength in mg"]
-
-    df["Patients Exposure (PTY) for period"] = (
-        df["Sales Figure (mg) or period/Volume of sales (in mg)"] / (ddd_value * 365)
-    ).round(0)
-
-    if "Product" in df.columns and "Molecule" not in df.columns:
-        df.rename(columns={"Product": "Molecule"}, inplace=True)
-
-    if "Country" not in df.columns:
-        df["Country"] = "Unknown"
-
-    df_sa = df[df["Country"] == country_name].copy()
-    df_non = df[df["Country"] != country_name].copy()
-
-    df_sa_fmt = format_df_for_report(df_sa, ddd_value)
-    df_non_fmt = format_df_for_report(df_non, ddd_value)
-
-    df_sa_tot = create_clean_total_row(df_sa_fmt)
-    df_non_tot = create_clean_total_row(df_non_fmt)
-
-    df_sa_fmt = pd.concat([df_sa_fmt, df_sa_tot], ignore_index=True)
-    df_non_fmt = pd.concat([df_non_fmt, df_non_tot], ignore_index=True)
-
-    sa_total = int(df_sa_tot["Patients Exposure (PTY) for period"].iloc[0])
-    non_sa_total = int(df_non_tot["Patients Exposure (PTY) for period"].iloc[0])
-    combined = sa_total + non_sa_total
-
-    print(f"📊 Combined Total Exposure: {combined}")
-
-    if sa_total == 0:
-        generate_fallback_doc(medicine)
-        return
-
-    doc = Document()
-    doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
-    doc.add_paragraph(
-        f"The MAH obtained initial MA for their generic formulation of {medicine} in {place} on {date}.\n"
-        f"The post-authorization exposure to {medicine} during the cumulative period was {combined} patients "
-        f"({place}: {sa_total} and Non {place}: {non_sa_total}) treatment days approximately and presented in Table 3."
+    # Combine summaries with PMIDs
+    combined_summaries = "\n\n".join(
+        f"PMID: {pmid}\nAbstract: {summary}" for pmid, summary in zip(df['PMID'], df['Summary'])
     )
 
-    add_table_with_data(doc, df_sa_fmt, f"                                                      {country_name} ")
-    add_table_with_data(doc, df_non_fmt, f"                                                      Non-{country_name} ")
+    # Define the LLM and prompt
+    filter_llm = ChatOllama(model="qwen3:4b", temperature=0.1, num_ctx=15000)
+    human_prompt = HumanMessagePromptTemplate.from_template(
+        "Select the top 3 abstracts from the following list that best match the indication: Treatment of schizophrenia or psychosis.\n\n{summaries}"
+    )
+    chat_prompt = ChatPromptTemplate.from_messages([human_prompt])
+    select_chain = LLMChain(llm=filter_llm, prompt=chat_prompt)
 
-    out_doc = f"{medicine}_Exposure.docx"
-    doc.save(out_doc)
-    print(f"✅ Word document saved as '{out_doc}'")
+    # Run the chain
+    response = select_chain.invoke({"summaries": combined_summaries})
 
-    final_df = pd.concat([
-        df_sa_fmt.assign(_Section="SA"),
-        df_non_fmt.assign(_Section="Non-SA")
-    ], ignore_index=True)
-    final_df.to_excel(EXCEL_OUTPUT_PATH, index=False)
-    print(f"✅ Final Excel overwritten with formatted columns: {EXCEL_OUTPUT_PATH}")
+    # Extract PMIDs using regex
+    selected_pmids = re.findall(r'PMID:\s*(\d+)', response['text'])
 
-# =========================================================
-# 3. DDD FALLBACK FETCH
-# =========================================================
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    # Filter the DataFrame
+    filtered_df = df[df['PMID'].astype(str).isin(selected_pmids)]
 
-def fetch_ddd_fallback(medicine, code):
-    if pd.isna(code):
-        return np.nan
-    url = f"https://atcddd.fhi.no/atc_ddd_index/?code={code}"
-    try:
-        r = requests.get(url, verify=False, timeout=10)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.content, "html.parser")
-        for td in soup.find_all("td", align="right"):
-            val = td.get_text(strip=True)
-            if val.replace('.', '', 1).isdigit():
-                print(f"Fetched fallback DDD for {medicine} ({code}): {val}")
-                return float(val)
-        print(f"No DDD value found for {medicine} ({code})")
-        return np.nan
-    except Exception as e:
-        print(f"Error during fallback DDD fetch for {medicine} ({code}): {e}")
-        return np.nan
+    # Display results
+    st.success("Top 3 Selected Abstracts:")
+    st.dataframe(filtered_df)
 
-# =========================================================
-# 4. MAIN EXECUTION
-# =========================================================
+    # Download option
+    csv_buffer = io.StringIO()
+    filtered_df.to_csv(csv_buffer, index=False)
+    st.download_button("📥 Download Selected", csv_buffer.getvalue(), file_name="top3_selected.csv", mime="text/csv")
+
+
 if __name__ == "__main__":
-    try:
-        ddd_df = pd.read_excel(DDD_EXCEL_PATH)
-    except Exception as e:
-        print(f"⚠️ Could not read DDD Excel: {e}")
-        ddd_df = pd.DataFrame()
+    main()
 
-    try:
-        if not os.path.exists(DOCX_PATH):
-            raise FileNotFoundError(f"File not found: {DOCX_PATH}")
 
-        table_data = extract_table_by_index(DOCX_PATH, 2)
-        print("##############################################################################@@@@", table_data)
+  C:\Users\shivam.mishra2\Downloads\Literature\Section18\final.py:166 in <module>
 
-        ddd_value = np.nan
-        if not ddd_df.empty and "Drug Name" in ddd_df.columns:
-            ddd_row = ddd_df[ddd_df["Drug Name"].str.lower() == MEDICINE.lower()]
-        else:
-            ddd_row = pd.DataFrame()
+    163 
+    164 
+    165 if __name__ == "__main__":
+  ❱ 166 │   main()
+    167 
 
-        if not ddd_row.empty and "DDD Value" in ddd_row.columns and not pd.isna(ddd_row.iloc[0]["DDD Value"]):
-            ddd_value = ddd_row.iloc[0]["DDD Value"]
-            print(f"✅ DDD value found in Excel: {ddd_value}")
-        else:
-            code = np.nan
-            if not ddd_row.empty and "Drug Code" in ddd_row.columns:
-                code = ddd_row.iloc[0]["Drug Code"]
-            elif "Drug Code" in getattr(ddd_df, "columns", []):
-                poss = ddd_df[ddd_df["Drug Name"].str.lower().str.contains(MEDICINE.lower(), na=False)]
-                if not poss.empty:
-                    code = poss.iloc[0]["Drug Code"]
-            ddd_value = fetch_ddd_fallback(MEDICINE, code)
-            if pd.isna(ddd_value):
-                print("❌ DDD value not found anywhere. Will use fallback document.")
+  C:\Users\shivam.mishra2\Downloads\Literature\Section18\final.py:135 in main
 
-        if table_data and not pd.isna(ddd_value):
-            save_table_to_excel(table_data, EXCEL_OUTPUT_PATH)
-            calculate_exposure_and_generate_doc(EXCEL_OUTPUT_PATH, ddd_value, COUNTRY, MEDICINE, PLACE, DATE)
-        else:
-            print("⚠️ Table not found or DDD missing. Generating fallback document.")
-            generate_fallback_doc(MEDICINE)
+    132 │   
+    133 │   # Combine summaries with PMIDs
+    134 │   combined_summaries = "\n\n".join(
+  ❱ 135 │   │   f"PMID: {pmid}\nAbstract: {summary}" for pmid, summary in zip(df['PMID
+    136 │   )
+    137 │   
+    138 │   # Define the LLM and prompt
+────────────────────────────────────────────────────────────────────────────────────────
+UnboundLocalError: cannot access local variable 'df' where it is not associated with a
+value
+C:\Users\shivam.mishra2\Downloads\Literature\Section18\final.py:92: LangChainDeprecationWarning: The method `BaseChatModel.__call__` was deprecated in langchain-core 0.1.7 and will be removed in 1.0. Use :meth:`~invoke` instead.
+  llm_response = llm([HumanMessagePromptTemplate.from_template(llm_prompt).format()])
+────────────────────────── Traceback (most recent call last) ───────────────────────────
+  C:\Users\shivam.mishra2\Downloads\Literature\myenv\Lib\site-packages\streamlit\runti
+  me\scriptrunner\exec_code.py:128 in exec_func_with_error_handling
 
-    except Exception as e:
-        print(f"⚠️ Error: {e}")
-        generate_fallback_doc(MEDICINE)
-    
+  C:\Users\shivam.mishra2\Downloads\Literature\myenv\Lib\site-packages\streamlit\runti
+  me\scriptrunner\script_runner.py:669 in code_to_exec
+
+  C:\Users\shivam.mishra2\Downloads\Literature\Section18\final.py:166 in <module>
+
+    163 
+    164 
+    165 if __name__ == "__main__":
+  ❱ 166 │   main()
+    167 
+
+  C:\Users\shivam.mishra2\Downloads\Literature\Section18\final.py:135 in main
+
+    132 │   
+    133 │   # Combine summaries with PMIDs
+    134 │   combined_summaries = "\n\n".join(
+  ❱ 135 │   │   f"PMID: {pmid}\nAbstract: {summary}" for pmid, summary in zip(df['PMID
+    136 │   )
+    137 │   
+    138 │   # Define the LLM and prompt
+────────────────────────────────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────────────────────────────────
+UnboundLocalError: cannot access local variable 'df' where it is not associated with a
+value
+────────────────────────── Traceback (most recent call last) ───────────────────────────
+  C:\Users\shivam.mishra2\Downloads\Literature\myenv\Lib\site-packages\streamlit\runti  
+  me\scriptrunner\exec_code.py:128 in exec_func_with_error_handling
+
+  C:\Users\shivam.mishra2\Downloads\Literature\myenv\Lib\site-packages\streamlit\runti  
+  me\scriptrunner\script_runner.py:669 in code_to_exec
+
+  C:\Users\shivam.mishra2\Downloads\Literature\Section18\final.py:166 in <module>       
+
+    163 
+    164 
+    165 if __name__ == "__main__":
+  ❱ 166 │   main()
+    167 
+
+  C:\Users\shivam.mishra2\Downloads\Literature\Section18\final.py:135 in main
+
+    132 │   
+    133 │   # Combine summaries with PMIDs
+    134 │   combined_summaries = "\n\n".join(
+  ❱ 135 │   │   f"PMID: {pmid}\nAbstract: {summary}" for pmid, summary in zip(df['PMID
+    136 │   )
+    137 │   
+    138 │   # Define the LLM and prompt
