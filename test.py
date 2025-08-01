@@ -7,7 +7,7 @@ import io
 import time
 import re
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from tqdm import tqdm
 
 from langchain_community.utilities import SerpAPIWrapper
@@ -22,6 +22,7 @@ try:
 except ImportError:
     st.error("Biopython not installed. Please run `pip install biopython`")
     st.stop()
+
 
 # -- PubMed Extractor Class --
 class PubMedExtractor:
@@ -52,7 +53,9 @@ class PubMedExtractor:
             if isinstance(abstract, list):
                 abstract = " ".join(abstract)
             authors = article.get("AuthorList", [])
-            author_names = "; ".join([a.get("LastName", "") + ", " + a.get("ForeName", "") for a in authors if "LastName" in a and "ForeName" in a])
+            author_names = "; ".join(
+                [a.get("LastName", "") + ", " + a.get("ForeName", "") for a in authors if "LastName" in a and "ForeName" in a]
+            )
             journal = article.get("Journal", {}).get("Title", "N/A")
             year = article.get("Journal", {}).get("JournalIssue", {}).get("PubDate", {}).get("Year", "N/A")
             articles.append({
@@ -65,6 +68,7 @@ class PubMedExtractor:
             })
         return articles
 
+
 # -- Streamlit App --
 def main():
     st.set_page_config(page_title="Pharmacovigilance Search Tool", layout="wide")
@@ -72,12 +76,12 @@ def main():
 
     with st.sidebar:
         st.header("🔧 Configuration")
-        email = "your_email@example.com"  # Default email to avoid manual entry
-        api_key = "6f5df4899c545b65d2b584c22e70ec181608"  # Automatically used
-        serpapi_key = "adb5d6da4a13ced8ad8f6f0d7b41804ae6df887f43d142ecfedaaa3c223eeebe"  # Automatically used
+        email = "your_email@example.com"  # Default email
+        api_key = "6f5df4899c545b65d2b584c22e70ec181608"
+        serpapi_key = "adb5d6da4a13ced8ad8f6f0d7b41804ae6df887f43d142ecfedaaa3c223eeebe"
         model_name = st.selectbox("LLM Model", ["gemma3:4b", "qwen3:4b"], index=0)
 
-    # SerpAPI Search
+    # Step 1: SerpAPI Search
     st.subheader("🧠 Step 1: Drug Discovery using SerpAPI")
     base_query = st.text_input("Query", value="what are the other phosphodiesterase inhibitor medicine similar to Tadalafil ?")
     if st.button("🔍 Find Related Drugs"):
@@ -89,13 +93,14 @@ def main():
 
         {serp_results}
         """
-        llm_response = llm([HumanMessagePromptTemplate.from_template(llm_prompt).format()])
+        message = HumanMessagePromptTemplate.from_template(llm_prompt).format()
+        llm_response = llm.invoke([message])
         extracted_drugs = llm_response.content
         st.success("✅ Extracted Drugs:")
         st.code(extracted_drugs)
         st.session_state["drug_names"] = extracted_drugs
 
-    # PubMed Search
+    # Step 2: PubMed Abstract Extraction
     st.subheader("📚 Step 2: PubMed Abstract Extraction")
     drug_input = st.text_area("Enter Drug Names to Search", value=st.session_state.get("drug_names", "Tadalafil"))
     if st.button("🔬 Fetch PubMed Abstracts"):
@@ -108,7 +113,7 @@ def main():
         st.session_state["abstract_df"] = df
         st.dataframe(df)
 
-    # Summarization
+    # Step 3: Summarization
     if "abstract_df" in st.session_state:
         st.subheader("🧾 Step 3: Summarization of Abstracts")
         df = st.session_state["abstract_df"]
@@ -123,120 +128,40 @@ def main():
             result = chain.invoke({"Abstract": abstract})
             summaries.append(result['text'])
         df['Summary'] = summaries
+        st.session_state["abstract_df"] = df  # Save back
         st.dataframe(df[['PMID', 'Title', 'Summary']])
 
     # Step 4: Select Relevant Summaries
     st.subheader("🎯 Step 4: Select Relevant Summaries")
-    if "abstract_df" in st.session_state:
+    if "abstract_df" in st.session_state and 'Summary' in st.session_state["abstract_df"].columns:
         df = st.session_state["abstract_df"]
 
-    # Combine summaries with PMIDs
-    combined_summaries = "\n\n".join(
-        f"PMID: {pmid}\nAbstract: {summary}" for pmid, summary in zip(df['PMID'], df['Summary'])
-    )
+        combined_summaries = "\n\n".join(
+            f"PMID: {pmid}\nAbstract: {summary}" for pmid, summary in zip(df['PMID'], df['Summary'])
+        )
 
-    # Define the LLM and prompt
-    filter_llm = ChatOllama(model="qwen3:4b", temperature=0.1, num_ctx=15000)
-    human_prompt = HumanMessagePromptTemplate.from_template(
-        "Select the top 3 abstracts from the following list that best match the indication: Treatment of schizophrenia or psychosis.\n\n{summaries}"
-    )
-    chat_prompt = ChatPromptTemplate.from_messages([human_prompt])
-    select_chain = LLMChain(llm=filter_llm, prompt=chat_prompt)
+        filter_llm = ChatOllama(model="qwen3:4b", temperature=0.1, num_ctx=15000)
+        human_prompt = HumanMessagePromptTemplate.from_template(
+            "Select the top 3 abstracts from the following list that best match the indication: Treatment of schizophrenia or psychosis.\n\n{summaries}"
+        )
+        chat_prompt = ChatPromptTemplate.from_messages([human_prompt])
+        select_chain = LLMChain(llm=filter_llm, prompt=chat_prompt)
 
-    # Run the chain
-    response = select_chain.invoke({"summaries": combined_summaries})
+        response = select_chain.invoke({"summaries": combined_summaries})
+        selected_pmids = re.findall(r'PMID:\s*(\d+)', response['text'])
 
-    # Extract PMIDs using regex
-    selected_pmids = re.findall(r'PMID:\s*(\d+)', response['text'])
+        filtered_df = df[df['PMID'].astype(str).isin(selected_pmids)]
 
-    # Filter the DataFrame
-    filtered_df = df[df['PMID'].astype(str).isin(selected_pmids)]
+        st.success("Top 3 Selected Abstracts:")
+        st.dataframe(filtered_df)
 
-    # Display results
-    st.success("Top 3 Selected Abstracts:")
-    st.dataframe(filtered_df)
-
-    # Download option
-    csv_buffer = io.StringIO()
-    filtered_df.to_csv(csv_buffer, index=False)
-    st.download_button("📥 Download Selected", csv_buffer.getvalue(), file_name="top3_selected.csv", mime="text/csv")
+        csv_buffer = io.StringIO()
+        filtered_df.to_csv(csv_buffer, index=False)
+        st.download_button("📥 Download Selected", csv_buffer.getvalue(), file_name="top3_selected.csv", mime="text/csv")
+    else:
+        st.info("Please complete Step 2 and Step 3 before selecting relevant abstracts.")
 
 
 if __name__ == "__main__":
     main()
-
-
-  C:\Users\shivam.mishra2\Downloads\Literature\Section18\final.py:166 in <module>
-
-    163 
-    164 
-    165 if __name__ == "__main__":
-  ❱ 166 │   main()
-    167 
-
-  C:\Users\shivam.mishra2\Downloads\Literature\Section18\final.py:135 in main
-
-    132 │   
-    133 │   # Combine summaries with PMIDs
-    134 │   combined_summaries = "\n\n".join(
-  ❱ 135 │   │   f"PMID: {pmid}\nAbstract: {summary}" for pmid, summary in zip(df['PMID
-    136 │   )
-    137 │   
-    138 │   # Define the LLM and prompt
-────────────────────────────────────────────────────────────────────────────────────────
-UnboundLocalError: cannot access local variable 'df' where it is not associated with a
-value
-C:\Users\shivam.mishra2\Downloads\Literature\Section18\final.py:92: LangChainDeprecationWarning: The method `BaseChatModel.__call__` was deprecated in langchain-core 0.1.7 and will be removed in 1.0. Use :meth:`~invoke` instead.
-  llm_response = llm([HumanMessagePromptTemplate.from_template(llm_prompt).format()])
-────────────────────────── Traceback (most recent call last) ───────────────────────────
-  C:\Users\shivam.mishra2\Downloads\Literature\myenv\Lib\site-packages\streamlit\runti
-  me\scriptrunner\exec_code.py:128 in exec_func_with_error_handling
-
-  C:\Users\shivam.mishra2\Downloads\Literature\myenv\Lib\site-packages\streamlit\runti
-  me\scriptrunner\script_runner.py:669 in code_to_exec
-
-  C:\Users\shivam.mishra2\Downloads\Literature\Section18\final.py:166 in <module>
-
-    163 
-    164 
-    165 if __name__ == "__main__":
-  ❱ 166 │   main()
-    167 
-
-  C:\Users\shivam.mishra2\Downloads\Literature\Section18\final.py:135 in main
-
-    132 │   
-    133 │   # Combine summaries with PMIDs
-    134 │   combined_summaries = "\n\n".join(
-  ❱ 135 │   │   f"PMID: {pmid}\nAbstract: {summary}" for pmid, summary in zip(df['PMID
-    136 │   )
-    137 │   
-    138 │   # Define the LLM and prompt
-────────────────────────────────────────────────────────────────────────────────────────
-────────────────────────────────────────────────────────────────────────────────────────
-UnboundLocalError: cannot access local variable 'df' where it is not associated with a
-value
-────────────────────────── Traceback (most recent call last) ───────────────────────────
-  C:\Users\shivam.mishra2\Downloads\Literature\myenv\Lib\site-packages\streamlit\runti  
-  me\scriptrunner\exec_code.py:128 in exec_func_with_error_handling
-
-  C:\Users\shivam.mishra2\Downloads\Literature\myenv\Lib\site-packages\streamlit\runti  
-  me\scriptrunner\script_runner.py:669 in code_to_exec
-
-  C:\Users\shivam.mishra2\Downloads\Literature\Section18\final.py:166 in <module>       
-
-    163 
-    164 
-    165 if __name__ == "__main__":
-  ❱ 166 │   main()
-    167 
-
-  C:\Users\shivam.mishra2\Downloads\Literature\Section18\final.py:135 in main
-
-    132 │   
-    133 │   # Combine summaries with PMIDs
-    134 │   combined_summaries = "\n\n".join(
-  ❱ 135 │   │   f"PMID: {pmid}\nAbstract: {summary}" for pmid, summary in zip(df['PMID
-    136 │   )
-    137 │   
-    138 │   # Define the LLM and prompt
+        
