@@ -1,317 +1,339 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import ssl
-ssl._create_default_https_context = ssl._create_unverified_context
-
-import streamlit as st
-import io
-import time
+import os, re, urllib3, requests
 import pandas as pd
-from datetime import datetime
-from typing import List, Dict, Optional, Tuple
-
-try:
-    from Bio import Entrez
-except ImportError:
-    st.error("Error: Biopython not installed. Run:  pip install biopython")
-    st.stop()
+import numpy as np
+from docx import Document
+from bs4 import BeautifulSoup
+import mammoth
+import re
+from docx import Document
 
 
-class PubMedExtractor:
-    def __init__(self, email: str, api_key: Optional[str] = None):
-        Entrez.email = email
-        if api_key:
-            Entrez.api_key = api_key
+# =========================================================
+# 0. CONFIG
+# =========================================================
+DOCX_PATH = r"C:\Users\shivam.mishra2\Downloads\ALL_PSUR_File\PSUR_all _Data\Olanzapine PSUR_South Africa_29-Sep-17 to 31-Mar-25\Draft\DRA\Data request form_olanzapine.docx"
+SEARCH_TEXT = "Cumulative sales data sale required"
+EXCEL_OUTPUT_PATH = r"C:\Users\shivam.mishra2\Downloads\New_Psur_File\marketing_exposure_tables.xlsx"
+DDD_EXCEL_PATH = r"drug_code_map_with_ddd.xlsx"
 
-    def search_pubmed(
-        self,
-        search_term: str,
-        journal: Optional[str] = None,
-        species: Optional[str] = None,
-        publication_type: Optional[str] = None,
-        language: Optional[str] = None,
-        age_group: Optional[str] = None,
-        free_full_text: bool = False,
-        author: Optional[str] = None,
-        mesh_terms: Optional[str] = None,
-    ) -> Tuple[List[str], str, int]:
-        query_parts = [search_term]
+COUNTRY  = "South Africa"
+MEDICINE = "Olanzapine"
+PLACE    = "South Africa"
+DATE     = "2020-01-01"
 
-        if journal:
-            query_parts.append(f'"{journal}"[Journal]')
-        if species and species.lower() != "all":
-            if species.lower() == "humans":
-                query_parts.append('"humans"[MeSH Terms]')
-            elif species.lower() == "animals":
-                query_parts.append('"animals"[MeSH Terms]')
-        if publication_type and publication_type != "All":
-            query_parts.append(f'"{publication_type}"[Publication Type]')
-        if language and language != "All":
-            query_parts.append(f'"{language}"[Language]')
-        if age_group and age_group != "All":
-            query_parts.append(f'"{age_group}"[MeSH Terms]')
-        if free_full_text:
-            query_parts.append('"free full text"[sb]')
-        if author:
-            query_parts.append(f'"{author}"[Author]')
-        if mesh_terms:
-            for term in [t.strip() for t in mesh_terms.split(",")]:
-                query_parts.append(f'"{term}"[MeSH Terms]')
+PRODUCT_DOSAGE_MAP = {
+    "Esomeprazole": "Gastro-resistant",
+    "Zipola 5": "Film coated Tablet",
+    "Zipola 10": "Film coated Tablet",
+    "Jubilonz OD10": "Oro dispersible tablet",
+    "Jubilonz OD5": "Oro dispersible tablet",
+    "SCHIZOLANZ": "Oro dispersible tablet",
+    "Olanzapine film coated tablets": "Film coated Tablet",
+    "Olanzapine": "Film coated Tablet"
+}
 
-        final_query = " AND ".join(query_parts)
+# =========================================================
+# 1. UTILITIES
+# =========================================================
+def extract_table_by_index(doc_path, table_index=2):
+    """Extract table by index from a Word document (.docx)"""
+    doc = Document(doc_path)
 
-        try:
-            handle = Entrez.esearch(db="pubmed", term=final_query, retmax=0)
-            search_results = Entrez.read(handle)
-            handle.close()
+    if table_index >= len(doc.tables):
+        print(f"❌ Table index {table_index} out of range. Total tables: {len(doc.tables)}")
+        return None
 
-            total_count = int(search_results["Count"])
-            if total_count == 0:
-                return [], final_query, 0
+    table = doc.tables[table_index]
+    table_data = []
 
-            max_retrievable = min(total_count, 20)
+    for row in table.rows:
+        table_data.append([cell.text.strip() for cell in row.cells])
 
-            handle = Entrez.esearch(
-                db="pubmed",
-                term=final_query,
-                retmax=max_retrievable,
-                sort="relevance"
-            )
-            search_results = Entrez.read(handle)
-            handle.close()
+    # Remove duplicate header row if present
+    if len(table_data) > 1 and table_data[0] == table_data[1]:
+        table_data.pop(1)
 
-            pmids = search_results.get("IdList", [])
-            return pmids, final_query, total_count
+    return table_data
 
-        except Exception as e:
-            st.error(f"Error searching PubMed: {e}")
-            return [], "", 0
-
-    def fetch_abstracts(self, pmids: List[str]) -> List[Dict]:
-        if not pmids:
-            return []
-
-        articles = []
-        batch_size = 500
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-
-        for i in range(0, len(pmids), batch_size):
-            batch_pmids = pmids[i:i + batch_size]
-            progress = (i + batch_size) / max(len(pmids), 1)
-            progress_bar.progress(min(progress, 1.0))
-            status_text.text(f"Fetching articles {i + 1} to {min(i + batch_size, len(pmids))} of {len(pmids)}...")
-
-            try:
-                handle = Entrez.efetch(db="pubmed", id=batch_pmids, rettype="medline", retmode="xml")
-                records = Entrez.read(handle)
-                handle.close()
-
-                for record in records.get("PubmedArticle", []):
-                    article_info = self._parse_article(record)
-                    if article_info:
-                        articles.append(article_info)
-
-                time.sleep(0.1)
-
-            except Exception as e:
-                st.warning(f"Error fetching batch {i // batch_size + 1}: {e}")
-                continue
-
-        progress_bar.progress(1.0)
-        status_text.text(f"Successfully extracted information for {len(articles)} articles")
-
-        return articles
-
-    def _parse_article(self, record) -> Optional[Dict]:
-        try:
-            medline = record.get("MedlineCitation", {})
-            article = medline.get("Article", {})
-            pmid = medline.get("PMID", "")
-
-            title = article.get("ArticleTitle", "N/A")
-
-            abstract_sections = article.get("Abstract", {}).get("AbstractText", [])
-            abstract = " ".join([str(section) for section in abstract_sections]) if isinstance(abstract_sections, list) else str(abstract_sections) if abstract_sections else "N/A"
-
-            authors = []
-            for auth in article.get("AuthorList", []):
-                if "LastName" in auth and "ForeName" in auth:
-                    authors.append(f"{auth['LastName']}, {auth['ForeName']}")
-                elif "CollectiveName" in auth:
-                    authors.append(auth["CollectiveName"])
-            authors_str = "; ".join(authors) if authors else "N/A"
-
-            journal_info = article.get("Journal", {})
-            journal_title = journal_info.get("Title", "N/A")
-
-            pub_date = "N/A"
-            pub_year = "N/A"
-            if "JournalIssue" in journal_info and "PubDate" in journal_info["JournalIssue"]:
-                date_info = journal_info["JournalIssue"]["PubDate"]
-                year = str(date_info.get("Year", "")).strip()
-                month = str(date_info.get("Month", "")).strip()
-                day = str(date_info.get("Day", "")).strip()
-                pub_date = "-".join([x for x in [year, month, day] if x])
-                pub_year = year if year else "N/A"
-
-            doi = "N/A"
-            article_ids = record.get("PubmedData", {}).get("ArticleIdList", [])
-            for article_id in article_ids:
-                if article_id.attributes.get("IdType") == "doi":
-                    doi = str(article_id)
-                    break
-
-            keywords = []
-            for kw_group in medline.get("KeywordList", []):
-                for kw in kw_group:
-                    keywords.append(str(kw))
-            keywords_str = "; ".join(keywords) if keywords else "N/A"
-
-            return {
-                "PMID": str(pmid),
-                "Title": title,
-                "Abstract": abstract,
-                "Authors": authors_str,
-                "Journal": journal_title,
-                "Publication_Date": pub_date,
-                "Publication_Year": pub_year,
-                "DOI": doi,
-                "Keywords": keywords_str,
-                "PubMed_URL": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-            }
-
-        except Exception:
-            return None
+def save_table_to_excel(table_data, excel_path):
+    os.makedirs(os.path.dirname(excel_path), exist_ok=True)
+    df = pd.DataFrame(table_data[1:], columns=table_data[0])
+    df.to_excel(excel_path, index=False)
+    print(f"✅ Table saved to: {excel_path}")
 
 
-def main():
-    st.set_page_config(page_title="PubMed Search Tool", page_icon="🔬", layout="wide")
-    st.title("🔬 PubMed Abstract Extractor")
-    st.caption("🔝 This version is limited to the top 20 most relevant articles.")
-    st.markdown("Search PubMed and extract abstracts with comprehensive filtering options.")
+def generate_fallback_doc(medicine):
+    doc = Document()
+    doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
+    doc.add_paragraph(
+        f"No cumulative and interval patient exposure from marketing experience was available as the MAH "
+        f"has not marketed its product {medicine} in any country since obtaining initial granting of MA "
+        f"till the DLP of this report."
+    )
+    out = f"{medicine}_Exposure.docx"
+    doc.save(out)
+    print(f"📄 Placeholder Word document saved as '{out}'")
 
-    with st.sidebar:
-        st.header("⚙️ Configuration")
-        email = st.text_input("Email Address*", help="Required by NCBI for API access")
-        api_key = st.text_input("NCBI API Key", type="password", help="Optional: For higher rate limits")
-        if not email:
-            st.warning("Please enter your email address to proceed")
-            st.stop()
 
-    st.header("🔍 Search Query")
-    search_term = st.text_area(
-        "Search Terms*",
-        placeholder="e.g., (diabetes) AND (treatment) NOT (case report)",
-        help="Use PubMed syntax: AND, OR, NOT",
+def map_dosage(product_name):
+    if pd.isna(product_name):
+        return ""
+    name = str(product_name).lower()
+    for k, v in PRODUCT_DOSAGE_MAP.items():
+        if k.lower() in name:
+            return v
+    return ""
+
+
+def add_dosage_column(df):
+    src_col = None
+    for c in ["Product", "Molecule"]:
+        if c in df.columns:
+            src_col = c
+            break
+    if src_col is None:
+        print("⚠️ Neither 'Product' nor 'Molecule' found. Skipping dosage mapping.")
+        return df
+    df["Dosage Form (Units)"] = df[src_col].apply(map_dosage)
+    return df
+
+
+def nice_int(x):
+    try:
+        return f"{int(float(str(x).replace(',', ''))):,}"
+    except Exception:
+        return x
+
+
+def format_df_for_report(df: pd.DataFrame, ddd_value: float) -> pd.DataFrame:
+    """Rename + reorder columns to: Country | Molecule | Dosage Form (Units) | Formulation Strength | DDD* |
+       Pack size | Sales figure (units)/Quantity Sold | Sales Figure (mg) or period/Volume of sales (in mg) |
+       Patients Exposure (PTY) for period
+    """
+    df = add_dosage_column(df)
+
+    # Formulation Strength from 'Strength in mg'
+    if "Strength in mg" in df.columns:
+        df["Formulation Strength"] = df["Strength in mg"].apply(
+            lambda v: f"{int(v)} mg" if pd.notna(v) else "")
+
+    df["DDD*"] = f"{int(ddd_value)} mg"
+
+    # Sales figure units
+    unit_col = "Number of tablets / Capsules/Injections"
+    if unit_col in df.columns:
+        df["Sales figure (units)/Quantity Sold"] = df[unit_col]
+
+    # final rename not necessary if already same
+    desired = [
+        "Country",
+        "Molecule",
+        "Dosage Form (Units)",
+        "Formulation Strength",
+        "DDD*",
+        "Pack size",
+        "Sales figure (units)/Quantity Sold",
+        "Sales Figure (mg) or period/Volume of sales (in mg)",
+        "Patients Exposure (PTY) for period",
+    ]
+
+    present = [c for c in desired if c in df.columns]
+    others  = [c for c in df.columns if c not in present]
+    df = df[present + others]
+
+    # number formatting
+    for col in ["Sales figure (units)/Quantity Sold",
+                "Sales Figure (mg) or period/Volume of sales (in mg)",
+                "Patients Exposure (PTY) for period"]:
+        if col in df.columns:
+            df[col] = df[col].apply(nice_int)
+
+    return df
+
+
+def add_table_with_data(doc: Document, dataframe: pd.DataFrame, title: str):
+    doc.add_heading(title, level=2)
+    table = doc.add_table(rows=1, cols=len(dataframe.columns))
+    table.style = 'Table Grid'
+    hdr_cells = table.rows[0].cells
+    for i, col_name in enumerate(dataframe.columns):
+        hdr_cells[i].text = str(col_name)
+
+    for _, row in dataframe.iterrows():
+        row_cells = table.add_row().cells
+        for i, item in enumerate(row):
+            row_cells[i].text = "" if pd.isna(item) else str(item)
+
+
+def create_clean_total_row(df_, total_col="Patients Exposure (PTY) for period"):
+    numeric = pd.to_numeric(df_[total_col].astype(str).str.replace(',', ''), errors='coerce')
+    total = int(numeric.sum()) if pd.notna(numeric.sum()) else 0
+    blank = {c: "" for c in df_.columns}
+    blank["Country"] = "Total"
+    blank[total_col] = total
+    return pd.DataFrame([blank])
+
+# =========================================================
+# 2. CORE
+# =========================================================
+def calculate_exposure_and_generate_doc(excel_path, ddd_value, country_name, medicine, place, date):
+    df = pd.read_excel(excel_path, engine='openpyxl')
+
+    # Clean & numeric prep
+    if "Strength in mg" in df.columns:
+        df["Strength in mg"] = df["Strength in mg"].astype(str).str.replace("mg", "", regex=False).str.strip()
+        df["Strength in mg"] = pd.to_numeric(df["Strength in mg"], errors='coerce')
+
+    unit_col = "Number of tablets / Capsules/Injections"
+    if unit_col in df.columns:
+        df[unit_col] = (df[unit_col].astype(str)
+                        .str.replace(",", "", regex=False)
+                        .str.split(":").str[-1]
+                        .str.strip())
+        df[unit_col] = pd.to_numeric(df[unit_col], errors='coerce')
+
+    if "Sales Figure (mg) or period/Volume of sales (in mg)" not in df.columns:
+        if unit_col in df.columns and "Strength in mg" in df.columns:
+            df["Sales Figure (mg) or period/Volume of sales (in mg)"] = df[unit_col] * df["Strength in mg"]
+
+    df["Patients Exposure (PTY) for period"] = (
+        df["Sales Figure (mg) or period/Volume of sales (in mg)"] / (ddd_value * 365)
+    ).round(0)
+
+    if "Product" in df.columns and "Molecule" not in df.columns:
+        df.rename(columns={"Product": "Molecule"}, inplace=True)
+
+    if "Country" not in df.columns:
+        print("⚠️ 'Country' column missing. Setting all to 'Unknown'")
+        df["Country"] = "Unknown"
+
+    df_sa  = df[df["Country"] == country_name].copy()
+    df_non = df[df["Country"] != country_name].copy()
+
+    # Format & totals
+    df_sa_fmt  = format_df_for_report(df_sa,  ddd_value)
+    df_non_fmt = format_df_for_report(df_non, ddd_value)
+
+    df_sa_tot  = create_clean_total_row(df_sa_fmt)
+    df_non_tot = create_clean_total_row(df_non_fmt)
+
+    df_sa_fmt  = pd.concat([df_sa_fmt,  df_sa_tot],  ignore_index=True)
+    df_non_fmt = pd.concat([df_non_fmt, df_non_tot], ignore_index=True)
+
+    sa_total     = int(df_sa_tot["Patients Exposure (PTY) for period"].iloc[0])
+    non_sa_total = int(df_non_tot["Patients Exposure (PTY) for period"].iloc[0])
+    combined     = sa_total + non_sa_total
+    print(f"📊 Combined Total Exposure: {combined}")
+
+    if sa_total == 0:
+        generate_fallback_doc(medicine)
+        return
+
+    # Word
+    doc = Document()
+    doc.add_heading("5.3 Cumulative and Interval Patient Exposure from Marketing Experience", level=1)
+    doc.add_paragraph(
+        f"The MAH obtained initial MA for their generic formulation of {medicine} in {place} on {date}.\n"
+        f"The post-authorization exposure to {medicine} during the cumulative period was {combined} patients "
+        f"({place}: {sa_total} and Non {place}: {non_sa_total}) treatment days approximately and presented in Table 3."
     )
 
-    with st.expander("🔧 Advanced Filters", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            journal = st.text_input("Journal Name", placeholder="e.g., Nature")
-            author = st.text_input("Author Name", placeholder="e.g., Smith J")
-            mesh_terms = st.text_input("MeSH Terms", placeholder="e.g., Diabetes Mellitus, Hypertension")
-        with c2:
-            species = st.selectbox("Species", ["All", "Humans", "Animals"])
-            publication_type = st.selectbox(
-                "Publication Type",
-                ["All", "Clinical Trial", "Randomized Controlled Trial", "Review", "Meta-Analysis",
-                 "Case Reports", "Observational Study", "Letter", "Editorial"],
-            )
-            language = st.selectbox("Language", ["All", "English", "Spanish", "French", "German", "Italian", "Japanese"])
-        with c3:
-            age_group = st.selectbox("Age Group", ["All", "Infant", "Child", "Adolescent", "Adult", "Middle Aged", "Aged"])
-            free_full_text = st.checkbox("Free Full Text Only")
-            remove_empty_abstracts = st.checkbox("Remove rows with empty 'Abstract'", value=True)
-            st.subheader("Result Limits")
-            st.info("Top 20 most relevant articles will be fetched.")
-            max_results = 20
+    add_table_with_data(doc, df_sa_fmt,  f"                                                      {country_name} ")
+    add_table_with_data(doc, df_non_fmt, f"                                                      Non-{country_name} ")
 
-    if search_term:
-        st.subheader("🔍 Search Preview")
-        preview_parts = [search_term]
-        if journal:
-            preview_parts.append(f'"{journal}"[Journal]')
-        if species and species != "All":
-            preview_parts.append(f'"{species.lower()}"[MeSH Terms]')
-        if publication_type and publication_type != "All":
-            preview_parts.append(f'"{publication_type}"[Publication Type]')
-        if language and language != "All":
-            preview_parts.append(f'"{language}"[Language]')
-        if age_group and age_group != "All":
-            preview_parts.append(f'"{age_group}"[MeSH Terms]')
-        if free_full_text:
-            preview_parts.append('"free full text"[sb]')
-        if author:
-            preview_parts.append(f'"{author}"[Author]')
-        if mesh_terms:
-            for t in [m.strip() for m in mesh_terms.split(",")]:
-                preview_parts.append(f'"{t}"[MeSH Terms]')
-        st.code(" AND ".join(preview_parts), language="text")
+    out_doc = f"{medicine}_Exposure.docx"
+    doc.save(out_doc)
+    print(f"✅ Word document saved as '{out_doc}'")
 
-    if st.button("🔍 Search PubMed", type="primary", disabled=not (search_term and email)):
-        extractor = PubMedExtractor(email, api_key)
+    # Overwrite Excel with formatted combined data
+    final_df = pd.concat([
+        df_sa_fmt.assign(_Section="SA"),
+        df_non_fmt.assign(_Section="Non-SA")
+    ], ignore_index=True)
+    final_df.to_excel(EXCEL_OUTPUT_PATH, index=False)
+    print(f"✅ Final Excel overwritten with formatted columns: {EXCEL_OUTPUT_PATH}")
 
-        with st.spinner("Searching PubMed..."):
-            pmids, query, total_count = extractor.search_pubmed(
-                search_term=search_term,
-                journal=journal or None,
-                species=species if species != "All" else None,
-                publication_type=publication_type if publication_type != "All" else None,
-                language=language if language != "All" else None,
-                age_group=age_group if age_group != "All" else None,
-                free_full_text=free_full_text,
-                author=author or None,
-                mesh_terms=mesh_terms or None,
-            )
+# =========================================================
+# 3. DDD FALLBACK
+# =========================================================
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-        if not pmids:
-            st.warning("No articles found matching your criteria.")
-            st.info(f"**Search Query Used:** {query}")
-            st.stop()
+def fetch_ddd_fallback(medicine, code):
+    if pd.isna(code):
+        return np.nan
+    url = f"https://atcddd.fhi.no/atc_ddd_index/?code={code}"
+    try:
+        r = requests.get(url, verify=False, timeout=10)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.content, "html.parser")
+        for td in soup.find_all("td", align="right"):
+            val = td.get_text(strip=True)
+            if val.replace('.', '', 1).isdigit():
+                print(f"Fetched fallback DDD for {medicine} ({code}): {val}")
+                return float(val)
+        print(f"No DDD value found for {medicine} ({code})")
+        return np.nan
+    except Exception as e:
+        print(f"Error during fallback DDD fetch for {medicine} ({code}): {e}")
+        return np.nan
 
-        st.success(f"Found {total_count} articles (retrieving top {min(len(pmids), max_results)})")
-        st.info(f"**Search Query Used:** {query}")
-
-        pmids = pmids[:max_results]
-
-        with st.spinner("Fetching article details..."):
-            articles = extractor.fetch_abstracts(pmids)
-
-        if not articles:
-            st.error("No article details could be fetched.")
-            st.stop()
-
-        df = pd.DataFrame(articles)
-
-        if remove_empty_abstracts:
-            before = len(df)
-            df = df[df["Abstract"].str.strip().ne("N/A") & df["Abstract"].str.strip().ne("")]
-            st.info(f"🧹 Removed {before - len(df)} rows with empty abstracts.")
-
-        st.header("📊 Results")
-        st.metric("Articles Returned", len(df))
-
-        st.subheader("📋 Article Details (truncated)")
-        display_df = df.copy()
-        display_df["Title"] = display_df["Title"].str.slice(0, 100) + "..."
-        display_df["Abstract"] = display_df["Abstract"].str.slice(0, 150) + "..."
-        st.dataframe(display_df[["PMID", "Title", "Authors", "Publication_Year", "Journal", "Publication_Date"]],
-                     use_container_width=True, hide_index=True)
-
-        st.subheader("💾 Download Results")
-        csv_buffer = io.StringIO()
-        df.to_csv(csv_buffer, index=False)
-        csv_string = csv_buffer.getvalue()
-        filename = f"pubmed_results_top20_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-
-        st.download_button("📥 Download CSV", csv_string, file_name=filename, mime="text/csv", type="primary")
-
-        with st.expander("👀 Preview Full DataFrame"):
-            st.dataframe(df, use_container_width=True)
-
-
+# =========================================================
+# 4. MAIN
+# =========================================================
 if __name__ == "__main__":
-    main()
+    try:
+        ddd_df = pd.read_excel(DDD_EXCEL_PATH)
+    except Exception as e:
+        print(f"⚠️ Could not read DDD Excel: {e}")
+        ddd_df = pd.DataFrame()
+
+    try:
+        if not os.path.exists(DOCX_PATH):
+            raise FileNotFoundError(f"File not found: {DOCX_PATH}")
+
+        doc = Document(DOCX_PATH)
+        table_data = extract_table_by_index(doc, 2)
+        print("##############################################################################@@@@",table_data)
+
+        # --- DDD logic ---
+        ddd_value = np.nan
+        if not ddd_df.empty and "Drug Name" in ddd_df.columns:
+            ddd_row = ddd_df[ddd_df["Drug Name"].str.lower() == MEDICINE.lower()]
+        else:
+            ddd_row = pd.DataFrame()
+
+        if (not ddd_row.empty and
+            "DDD Value" in ddd_row.columns and
+            not pd.isna(ddd_row.iloc[0]["DDD Value"])):
+            ddd_value = ddd_row.iloc[0]["DDD Value"]
+            print(f"✅ DDD value found in Excel: {ddd_value}")
+        else:
+            code = np.nan
+            if not ddd_row.empty and "Drug Code" in ddd_row.columns:
+                code = ddd_row.iloc[0]["Drug Code"]
+            elif "Drug Code" in getattr(ddd_df, "columns", []):
+                poss = ddd_df[ddd_df["Drug Name"].str.lower().str.contains(MEDICINE.lower(), na=False)]
+                if not poss.empty:
+                    code = poss.iloc[0]["Drug Code"]
+            ddd_value = fetch_ddd_fallback(MEDICINE, code)
+            if pd.isna(ddd_value):
+                print("❌ DDD value not found anywhere. Will use fallback document.")
+
+        if table_data and not pd.isna(ddd_value):
+            save_table_to_excel(table_data, EXCEL_OUTPUT_PATH)
+            calculate_exposure_and_generate_doc(EXCEL_OUTPUT_PATH, ddd_value, COUNTRY, MEDICINE, PLACE, DATE)
+        else:
+            print("⚠️ Table not found or DDD missing. Generating fallback document.")
+            generate_fallback_doc(MEDICINE)
+
+    except Exception as e:
+        print(f"⚠️ Error: {e}")
+        generate_fallback_doc(MEDICINE)
+
+# correct the bellow erro
+# ⚠️ Error: 'Document' object has no attribute 'seek'
+# 📄 Placeholder Word document saved as 'Olanzapine_Exposure.docx'
+    
